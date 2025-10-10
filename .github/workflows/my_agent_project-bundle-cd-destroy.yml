@@ -1,0 +1,38 @@
+# This GitHub workflow destroys Bundle resources
+# only on manual workflow dispatch
+
+name: Bundle Destroy for my_agent_project Prod
+
+on:
+  push:
+    branches:
+      - 'release'
+  workflow_dispatch:
+
+defaults:
+  run:
+    working-directory: ./my_agent_project
+
+env:
+  DATABRICKS_HOST: https://<instance>.cloud.databricks.com
+  DATABRICKS_CLIENT_SECRET: ${{ secrets.PROD_DATABRICKS_CLIENT_SECRET }}
+  DATABRICKS_CLIENT_ID: ${{ secrets.PROD_DATABRICKS_CLIENT_ID }}
+  #DATABRICKS_TOKEN: ${{ secrets.PROD_WORKSPACE_TOKEN }}
+
+jobs:
+  prod:
+    concurrency: my_agent_project-prod-bundle-job
+    runs-on:
+      group: <runner-group>
+      labels: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: databricks/setup-cli@v0.258.0
+      - name: Validate Bundle For Prod
+        id: validate
+        run: |
+          databricks bundle validate -t prod
+      - name: Deploy Bundle to Prod
+        id: deploy
+        run: |
+          databricks bundle deploy -t prod

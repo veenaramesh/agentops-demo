@@ -1,0 +1,52 @@
+common_permissions: &permissions
+  permissions:
+    - level: CAN_VIEW
+      group_name: users
+
+
+resources:
+  jobs:
+    clean_up_job:
+      name: ${bundle.target}-my_agent_project-clean_up_job
+      tasks:
+        - task_key: CleanUp
+          notebook_task:
+            notebook_path: ../clean_up/notebooks/clean_up.py
+            base_parameters:
+              # TODO: set these to true if you want to delete these assets before databricks bundle destroy
+              # set whether or not you want to delete these assets
+              raw_data_table: "False"
+              preprocessed_data_table: "False"
+              docs_volume: "False"
+              vector_search_endpoint: "False"
+              vector_search_index: "False"
+              eval_table: "False"
+              agent_deployment: "False"
+              uc_functions: "False"
+              model_versions: "True"
+
+              # identifiers
+              uc_catalog_name: ${var.uc_catalog}
+              schema_name: ${var.schema}
+              raw_data_table_name: ${var.raw_data_table}
+              preprocessed_data_table_name: ${var.preprocessed_data_table}
+              vector_search_endpoint_name: ${var.vector_search_endpoint}
+              eval_table_name: ${var.eval_table}
+              registered_model_name: ${var.registered_model}
+              # git source information of current ML resource deployment. It will be persisted as part of the workflow run
+              git_source_info: url:${bundle.git.origin_url}; branch:${bundle.git.branch}; commit:${bundle.git.commit}
+          environment_key: clean_up_requirements
+
+      environments:
+        - environment_key: clean_up_requirements
+          spec:
+            client: "3"
+
+      <<: *permissions
+      # If you want to turn on notifications for this job, please uncomment the below code,
+      # and provide a list of emails to the on_failure argument.
+      #
+      #  email_notifications:
+      #    on_failure:
+      #      - first@company.com
+      #      - second@company.com
