@@ -1,0 +1,61 @@
+common_permissions: &permissions
+  permissions:
+    - level: CAN_VIEW
+      group_name: users
+
+resources:
+  jobs:
+    deploy_uc_functions_job:
+      name: ${bundle.target}-tools-deploy-uc-functions-job
+      tasks:
+        - task_key: DeployUCFunctions
+          notebook_task:
+            notebook_path: ../notebooks/DeployUCFunctions.py
+            base_parameters:
+              uc_catalog: ${var.uc_catalog}
+              schema: ${var.schema}
+              git_source_info: url:${bundle.git.origin_url}; branch:${bundle.git.branch}; commit:${bundle.git.commit}
+          environment_key: tools_requirements
+      <<: *permissions
+
+      environments:
+        - environment_key: tools_requirements
+          spec:
+            client: "3"
+            dependencies:
+              - "-r /Workspace/Users/${workspace.current_user.userName}/.bundle/${bundle.name}/${bundle.target}/files/requirements.txt"
+              - "-e /Workspace/Users/${workspace.current_user.userName}/.bundle/${bundle.name}/${bundle.target}/files"
+
+targets:
+  dev:
+    resources:
+      jobs:
+        deploy_uc_functions_job:
+          schedule:
+            quartz_cron_expression: "0 0 12 1 1/1 ? * "
+            pause_status: "PAUSED"
+            timezone_id: UTC
+  test:
+    resources:
+      jobs:
+        deploy_uc_functions_job:
+          schedule:
+            quartz_cron_expression: "0 0 12 1 1/1 ? * "
+            pause_status: "PAUSED"
+            timezone_id: UTC
+  staging:
+    resources:
+      jobs:
+        deploy_uc_functions_job:
+          schedule:
+            quartz_cron_expression: "0 0 12 1 1/1 ? * "
+            pause_status: "PAUSED"
+            timezone_id: UTC
+  prod:
+    resources:
+      jobs:
+        deploy_uc_functions_job:
+          schedule:
+            quartz_cron_expression: "0 0 12 1 1/1 ? * "
+            pause_status: "PAUSED"
+            timezone_id: UTC

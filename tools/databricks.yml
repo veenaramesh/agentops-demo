@@ -1,0 +1,35 @@
+# Tools bundle: UC functions and tool definitions used by the agent.
+# Deploy this bundle to create execute_python_code, ask_ai, summarize, translate in Unity Catalog.
+# Run the deploy-uc-functions job so the agent bundle can reference these tools.
+bundle:
+  name: tools
+
+include:
+  - ../global_bundle.yml
+  - ./resources/tools-resource.yml
+
+targets:
+  dev:
+    default: true
+    variables:
+      schema: "agentops_dab_demo_dev"
+    workspace:
+      host: https://<instance>.cloud.databricks.com
+
+  staging:
+    variables:
+      schema: "agentops_dab_demo_staging"
+    workspace:
+      host: https://<instance>.cloud.databricks.com
+
+  prod:
+    variables:
+      schema: "agentops_dab_demo_prod"
+    workspace:
+      host: https://<instance>.cloud.databricks.com
+
+  test:
+    variables:
+      schema: "agentops_dab_demo_test"
+    workspace:
+      host: https://<instance>.cloud.databricks.com

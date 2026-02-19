@@ -1,0 +1,27 @@
+common_permissions: &permissions
+  permissions:
+    - level: CAN_VIEW
+      group_name: users
+
+resources:
+  jobs:
+    app_deployment_job:
+      parameters:
+        - name: bundle_root
+          default: ${workspace.file_path}
+      name: ${bundle.target}-agent-app-deployment-job
+      tasks:
+        - task_key: AppDeployment
+          notebook_task:
+            notebook_path: ../agent_deployment/chat_interface_deployment/LaunchApp.py
+            base_parameters:
+              uc_catalog: ${var.uc_catalog}
+              schema: ${var.schema}
+              registered_model: ${var.registered_model}
+              app_name: ${var.chatbot_name}
+              git_source_info: url:${bundle.git.origin_url}; branch:${bundle.git.branch}; commit:${bundle.git.commit}
+      schedule:
+        quartz_cron_expression: "0 0 12 1 1/1 ? * "
+        pause_status: "PAUSED"
+        timezone_id: UTC
+      <<: *permissions

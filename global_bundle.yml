@@ -1,0 +1,11 @@
+# Shared variables across retriever, tools, and agent bundles.
+# Included by each bundle's databricks.yml so uc_catalog and schema stay in sync.
+# Target-specific overrides (e.g. schema per env) remain in each bundle's targets.
+
+variables:
+  uc_catalog:
+    description: Unity Catalog used by all bundles (retriever, tools, agent).
+    default: main
+  schema:
+    description: Schema in Unity Catalog (use same value per target across all bundles).
+    default: agentops_dab_demo
