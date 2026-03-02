@@ -1,0 +1,68 @@
+# Vector search job: creates endpoint and index from preprocessed_data_table.
+# Run after data_prep_job so the preprocessed table exists.
+common_permissions: &permissions
+  permissions:
+    - level: CAN_VIEW
+      group_name: users
+
+resources:
+  jobs:
+    vector_search_job:
+      parameters:
+        - name: bundle_root
+          default: ${workspace.file_path}
+      name: ${bundle.target}-retriever-vector-search-job
+      tasks:
+        - task_key: VectorSearchIndex
+          notebook_task:
+            notebook_path: ../vector_search/notebooks/VectorSearch.py
+            base_parameters:
+              bundle_root: ${workspace.file_path}
+              uc_catalog: ${var.uc_catalog}
+              schema: ${var.schema}
+              preprocessed_data_table: ${var.preprocessed_data_table}
+              vector_search_endpoint: ${var.vector_search_endpoint}
+              git_source_info: url:${bundle.git.origin_url}; branch:${bundle.git.branch}; commit:${bundle.git.commit}
+          environment_key: vector_search_requirements
+      <<: *permissions
+
+      environments:
+        - environment_key: vector_search_requirements
+          spec:
+            client: "3"
+            dependencies:
+              - "-r /Workspace/Users/${workspace.current_user.userName}/.bundle/${bundle.name}/${bundle.target}/files/vector_search/requirements.txt"
+
+targets:
+  dev:
+    resources:
+      jobs:
+        vector_search_job:
+          schedule:
+            quartz_cron_expression: "0 0 12 1 1/1 ? * "
+            pause_status: "PAUSED"
+            timezone_id: UTC
+  test:
+    resources:
+      jobs:
+        vector_search_job:
+          schedule:
+            quartz_cron_expression: "0 0 12 1 1/1 ? * "
+            pause_status: "PAUSED"
+            timezone_id: UTC
+  prod:
+    resources:
+      jobs:
+        vector_search_job:
+          schedule:
+            quartz_cron_expression: "0 0 12 1 1/1 ? * "
+            pause_status: "UNPAUSED"
+            timezone_id: UTC
+  staging:
+    resources:
+      jobs:
+        vector_search_job:
+          schedule:
+            quartz_cron_expression: "0 0 12 1 1/1 ? * "
+            pause_status: "UNPAUSED"
+            timezone_id: UTC

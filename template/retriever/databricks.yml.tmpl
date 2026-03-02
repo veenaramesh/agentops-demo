@@ -1,0 +1,48 @@
+{{- if eq .include_retriever "yes" -}}
+# Retriever bundle: data ingestion, preprocessing, and Vector Search index.
+# Deploy order: data_prep_job first (writes preprocessed table), then vector_search_job (builds index).
+bundle:
+  name: {{.project_name}}-retriever
+
+include:
+  - ../global_bundle.yml
+  - ./resources/data_preparation-resource.yml
+  - ./resources/vector_search-resource.yml
+
+variables:
+  raw_data_table:
+    description: UC table for raw ingested documents.
+    default: raw_docs
+  preprocessed_data_table:
+    description: UC table for chunked/preprocessed documents (input to Vector Search).
+    default: preprocessed_docs
+  vector_search_endpoint:
+    description: Vector Search endpoint name.
+    default: {{.vector_search_endpoint}}
+
+targets:
+  dev:
+    default: true
+    variables:
+      schema: "{{.project_name}}_dev"
+    workspace:
+      host: {{.databricks_host}}
+
+  staging:
+    variables:
+      schema: "{{.project_name}}_staging"
+    workspace:
+      host: {{.databricks_host}}
+
+  prod:
+    variables:
+      schema: "{{.project_name}}_prod"
+    workspace:
+      host: {{.databricks_host}}
+
+  test:
+    variables:
+      schema: "{{.project_name}}_test"
+    workspace:
+      host: {{.databricks_host}}
+{{- end -}}
