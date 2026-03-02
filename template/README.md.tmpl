@@ -1,18 +1,27 @@
-# AgentOps Demo
+# {{.project_name}}
 
-This directory contains an Agent project defining a production-grade Agent pipeline for automated data preparation, agent development, and deployment of a chatbot agent.
+Production-grade Databricks Agent project generated from the AgentOps DAB Template.
 
-## Polyrepo layout (recommended)
+## Project layout
 
-The repo is organized as **three Databricks Asset Bundles**, one per component. Each can be developed, validated, and deployed independently (or split into separate git repos later).
+This repo is organized as independent Databricks Asset Bundles — one per component. Each can be developed, validated, and deployed independently.
 
 | Bundle | Description | Deploy order |
 |--------|-------------|--------------|
+{{- if eq .include_retriever "yes"}}
 | **retriever** | Data ingestion, preprocessing, and Vector Search index | 1st |
-| **tools** | UC functions used by the agent (`execute_python_code`, `ask_ai`, `summarize`, `translate`) | 2nd (or with retriever) |
-| **agent** | Agent development, evaluation, model serving, and chat app | 3rd |
+{{- end}}
+{{- if eq .include_tools "yes"}}
+| **tools** | UC functions (`execute_python_code`, `ask_ai`, `summarize`, `translate`) | 2nd |
+{{- end}}
+{{- if eq .include_agent "yes"}}
+| **agent** | LangGraph agent, evaluation, model serving, and chat app | 3rd |
+{{- end}}
+{{- if eq .include_evaluation "yes"}}
+| **evaluation** | Golden-dataset curator app + MergeReviewedTraces job | any time |
+{{- end}}
 
-Use the same `uc_catalog` and `schema` in all three bundles so the agent can use the index and UC functions. **Shared variables** are defined once in `global_bundle.yml` and inherited by each bundle via `include:`; see [shared/README.md](./shared/README.md).
+Shared variables (`uc_catalog`, `schema`) are defined once in `global_bundle.yml` and included by each bundle.
 
 ```
 agentops-demo

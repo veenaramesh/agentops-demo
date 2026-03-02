@@ -21,6 +21,7 @@ resources:
               vector_search_index: ${var.vector_search_index}
               experiment: ${var.experiment}
               registered_model: ${var.registered_model}
+              llm_model: ${var.llm_model}
               max_words: 200
               model_alias: ${var.model_alias}
               git_source_info: url:${bundle.git.origin_url}; branch:${bundle.git.branch}; commit:${bundle.git.commit}

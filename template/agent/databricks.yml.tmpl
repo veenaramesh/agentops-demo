@@ -1,0 +1,77 @@
+{{- if eq .include_agent "yes" -}}
+# Agent bundle: LangGraph agent development, evaluation, model serving, and Databricks App chat UI.
+# Prerequisites: retriever bundle deployed (vector search index ready) + tools bundle deployed.
+bundle:
+  name: {{.project_name}}-agent
+
+include:
+  - ../global_bundle.yml
+  - ./resources/agent-resource.yml
+  - ./resources/agents-artifacts-resource.yml
+  - ./resources/app-deployment-resource.yml
+
+variables:
+  # --- Model & experiment ---
+  registered_model:
+    description: UC registered model name for the agent.
+    default: {{.project_name}}_agent
+  model_alias:
+    description: MLflow model alias promoted after passing evaluation.
+    default: champion
+  experiment:
+    description: MLflow experiment path for agent development runs.
+    default: /Users/${workspace.current_user.userName}/{{.project_name}}_experiment
+  llm_model:
+    description: Foundation model ID used by the agent (Databricks Model Serving endpoint or FMAPI model).
+    default: {{.llm_model_name}}
+
+  # --- Vector Search (populated by retriever bundle) ---
+  vector_search_endpoint:
+    description: Vector Search endpoint name.
+    default: {{.vector_search_endpoint}}
+  vector_search_index:
+    description: Fully-qualified Vector Search index name (catalog.schema.index_name).
+    default: ${var.uc_catalog}.${var.schema}.{{.project_name}}_index
+
+  # --- Serving & app ---
+  agent_model_serving_endpoint:
+    description: Model Serving endpoint name for the deployed agent.
+    default: {{.project_name}}_endpoint
+  chatbot_name:
+    description: Databricks App name for the chat UI.
+    default: {{.project_name}}-chatbot
+  scale_to_zero:
+    description: Scale the model serving endpoint to zero when idle.
+    default: "true"
+
+  # --- Evaluation ---
+  eval_table:
+    description: UC table containing the golden evaluation dataset.
+    default: {{.project_name}}_eval
+
+targets:
+  dev:
+    default: true
+    variables:
+      schema: "{{.project_name}}_dev"
+    workspace:
+      host: {{.databricks_host}}
+
+  staging:
+    variables:
+      schema: "{{.project_name}}_staging"
+    workspace:
+      host: {{.databricks_host}}
+
+  prod:
+    variables:
+      schema: "{{.project_name}}_prod"
+    workspace:
+      host: {{.databricks_host}}
+
+  test:
+    variables:
+      schema: "{{.project_name}}_test"
+    workspace:
+      host: {{.databricks_host}}
+{{- end -}}

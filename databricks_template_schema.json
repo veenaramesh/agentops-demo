@@ -1,0 +1,84 @@
+{
+  "welcome_message": "Welcome to the AgentOps DAB Template!\n\nThis scaffolds a production-grade Databricks Agent project. Pick the components you need:\n  - retriever  : data ingestion, chunking, and Vector Search index\n  - tools      : Unity Catalog functions (ask_ai, summarize, translate, execute_python_code)\n  - agent      : LangGraph agent, evaluation, model serving, and chat app\n  - evaluation : golden-dataset curator app + MergeReviewedTraces job\n\nSee README.md in the generated project for full setup instructions.\n",
+  "min_databricks_cli_version": "v0.238.0",
+  "properties": {
+    "project_name": {
+      "type": "string",
+      "default": "my_agent_project",
+      "description": "Project name — lowercase letters, digits, underscores or hyphens only (used as a prefix for bundle names, resource names, and UC schema names)",
+      "pattern": "^[a-z][a-z0-9_-]{2,}$",
+      "order": 1
+    },
+    "uc_catalog": {
+      "type": "string",
+      "default": "main",
+      "description": "Unity Catalog catalog name (must already exist in your workspace)",
+      "order": 2
+    },
+    "databricks_host": {
+      "type": "string",
+      "default": "https://",
+      "description": "Databricks workspace URL (e.g. https://dbc-XXXX.cloud.databricks.com)",
+      "pattern": "^https://",
+      "order": 3
+    },
+    "include_retriever": {
+      "type": "string",
+      "default": "yes",
+      "description": "Include the retriever bundle? (data ingestion + chunking + Vector Search index)",
+      "enum": ["yes", "no"],
+      "order": 4
+    },
+    "include_tools": {
+      "type": "string",
+      "default": "yes",
+      "description": "Include the tools bundle? (Unity Catalog functions: ask_ai, summarize, translate, execute_python_code)",
+      "enum": ["yes", "no"],
+      "order": 5
+    },
+    "include_agent": {
+      "type": "string",
+      "default": "yes",
+      "description": "Include the agent bundle? (LangGraph agent + evaluation + model serving + Databricks App chat UI)",
+      "enum": ["yes", "no"],
+      "order": 6
+    },
+    "include_evaluation": {
+      "type": "string",
+      "default": "yes",
+      "description": "Include the evaluation bundle? (golden-dataset curator Databricks App + MergeReviewedTraces job)",
+      "enum": ["yes", "no"],
+      "order": 7
+    },
+    "vector_search_endpoint": {
+      "type": "string",
+      "default": "vs_endpoint",
+      "description": "Vector Search endpoint name (used by retriever and/or agent bundles)",
+      "order": 8,
+      "skip_prompt_if": {
+        "properties": {
+          "include_retriever": {"const": "no"},
+          "include_agent": {"const": "no"}
+        }
+      }
+    },
+    "llm_model_name": {
+      "type": "string",
+      "default": "databricks-meta-llama-3-3-70b-instruct",
+      "description": "Foundation model ID for the agent (e.g. databricks-meta-llama-3-3-70b-instruct)",
+      "order": 9,
+      "skip_prompt_if": {
+        "properties": {
+          "include_agent": {"const": "no"}
+        }
+      }
+    },
+    "github_runner_group": {
+      "type": "string",
+      "default": "Default",
+      "description": "GitHub Actions runner group name for self-hosted runners",
+      "order": 10
+    }
+  },
+  "success_message": "\n✅  Project '{{.project_name}}' created successfully!\n\nComponents included:\n{{- if eq .include_retriever \"yes\"}}  ✓ retriever   — data prep + Vector Search index{{end}}\n{{- if eq .include_tools \"yes\"}}  ✓ tools       — UC functions{{end}}\n{{- if eq .include_agent \"yes\"}}  ✓ agent       — LangGraph agent + serving + chat app{{end}}\n{{- if eq .include_evaluation \"yes\"}}  ✓ evaluation  — golden-dataset curator + merge job{{end}}\n\nDeploy in order:\n{{- if eq .include_retriever \"yes\"}}\n  cd {{.project_name}}/retriever\n  databricks bundle deploy -t dev\n  databricks bundle run data_prep_job -t dev\n  databricks bundle run vector_search_job -t dev\n{{- end}}\n{{- if eq .include_tools \"yes\"}}\n  cd {{.project_name}}/tools\n  databricks bundle deploy -t dev\n  databricks bundle run deploy_uc_functions_job -t dev\n{{- end}}\n{{- if eq .include_agent \"yes\"}}\n  cd {{.project_name}}/agent\n  databricks bundle deploy -t dev\n  databricks bundle run agent_development_job -t dev\n{{- end}}\n{{- if eq .include_evaluation \"yes\"}}\n  cd {{.project_name}}/evaluation\n  databricks bundle deploy -t dev\n{{- end}}\n\nSee README.md for full documentation.\n"
+}

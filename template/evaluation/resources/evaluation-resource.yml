@@ -1,0 +1,83 @@
+# Evaluation resources: Lakehouse App (curator UI) + MergeReviewedTraces job.
+# The app writes only to the review queue; the job owns all writes to the eval dataset.
+
+app_permissions: &app_permissions
+  permissions:
+    - level: CAN_USE
+      group_name: users
+
+job_permissions: &job_permissions
+  permissions:
+    - level: CAN_VIEW
+      group_name: users
+
+resources:
+
+  apps:
+    golden_dataset_curator:
+      name: "${bundle.target}-golden-dataset-curator"
+      description: >
+        Multi-reviewer UI for curating production traces into the golden evaluation
+        dataset. Submits decisions to the review queue; MergeReviewedTraces merges them.
+      source_code_path: ../app
+      resources:
+        - name: sql-warehouse
+          sql_warehouse:
+            id: ${var.sql_warehouse_id}
+            permission: CAN_USE
+      <<: *app_permissions
+
+  jobs:
+    merge_reviewed_traces_job:
+      name: ${bundle.target}-evaluation-merge-reviewed-traces
+      tasks:
+        - task_key: MergeReviewedTraces
+          notebook_task:
+            notebook_path: ../MergeReviewedTraces.py
+            base_parameters:
+              uc_catalog: ${var.uc_catalog}
+              schema: ${var.schema}
+              traces_table: ${var.traces_table}
+              review_table: ${var.review_table}
+              eval_table: ${var.eval_table}
+              min_approvals: ${var.min_approvals}
+          environment_key: evaluation_env
+      environments:
+        - environment_key: evaluation_env
+          spec:
+            client: "3"
+      <<: *job_permissions
+
+targets:
+  dev:
+    resources:
+      jobs:
+        merge_reviewed_traces_job:
+          schedule:
+            quartz_cron_expression: "0 0 2 * * ?"
+            pause_status: PAUSED
+            timezone_id: UTC
+  test:
+    resources:
+      jobs:
+        merge_reviewed_traces_job:
+          schedule:
+            quartz_cron_expression: "0 0 2 * * ?"
+            pause_status: PAUSED
+            timezone_id: UTC
+  staging:
+    resources:
+      jobs:
+        merge_reviewed_traces_job:
+          schedule:
+            quartz_cron_expression: "0 0 2 * * ?"
+            pause_status: UNPAUSED
+            timezone_id: UTC
+  prod:
+    resources:
+      jobs:
+        merge_reviewed_traces_job:
+          schedule:
+            quartz_cron_expression: "0 0 2 * * ?"
+            pause_status: UNPAUSED
+            timezone_id: UTC

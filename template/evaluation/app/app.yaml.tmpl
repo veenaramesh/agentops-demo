@@ -1,0 +1,43 @@
+command: [
+  "python",
+  "app.py"
+]
+
+env:
+  # SQL warehouse used for all queries and inserts.
+  - name: "DATABRICKS_WAREHOUSE_ID"
+    valueFrom: "sql-warehouse"
+
+  # Unity Catalog location of both the traces and eval tables.
+  - name: "UC_CATALOG"
+    value: "{{.uc_catalog}}"
+  - name: "UC_SCHEMA"
+    value: "{{.project_name}}_dev"
+
+  # Production traces table — the source of candidates for the golden dataset.
+  - name: "TRACES_TABLE"
+    value: "production_traces"
+
+  # Golden evaluation dataset table consumed by AgentEvaluation.py.
+  # The app never writes here — MergeReviewedTraces.py does.
+  - name: "EVAL_TABLE"
+    value: "{{.project_name}}_eval"
+
+  # Staging table where reviewer decisions are collected before the merge job runs.
+  - name: "REVIEW_TABLE"
+    value: "trace_review_queue"
+
+  # Column names in the traces table.
+  # Override these if your table uses different column names.
+  - name: "TRACES_ID_COL"
+    value: "trace_id"
+  - name: "TRACES_QUESTION_COL"
+    value: "question"
+  - name: "TRACES_RESPONSE_COL"
+    value: "response"
+  - name: "TRACES_TS_COL"
+    value: "timestamp"
+
+  # Rows displayed per page (default 25).
+  - name: "PAGE_SIZE"
+    value: "25"
