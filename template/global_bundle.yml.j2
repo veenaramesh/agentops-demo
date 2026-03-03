@@ -5,7 +5,7 @@
 variables:
   uc_catalog:
     description: Unity Catalog used by all bundles.
-    default: {{.uc_catalog}}
+    default: {{ uc_catalog }}
   schema:
     description: UC schema (use the same value per target across all bundles).
-    default: {{.project_name}}
+    default: {{ project_name }}

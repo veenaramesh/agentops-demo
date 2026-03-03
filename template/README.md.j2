@@ -1,0 +1,215 @@
+# {{ project_name }}
+
+Production-grade Databricks Agent project generated from the AgentOps DAB Template.
+
+---
+
+## How this project works
+
+This project is organized as independent Databricks Asset Bundles — one per component. Each bundle can be developed, validated, and deployed on its own lifecycle.
+
+| Bundle | What it does | Deploy order |
+|--------|-------------|--------------|
+{%- if include_retriever == "yes" %}
+| [**retriever**](./retriever/README.md) | Data ingestion, preprocessing, and Vector Search index | 1st |
+{%- endif %}
+{%- if include_tools == "yes" %}
+| [**tools**](./tools/README.md) | UC functions used by the agent | 2nd |
+{%- endif %}
+{%- if include_agent == "yes" %}
+| [**agent**](./agent/README.md) | LangGraph agent, evaluation, model serving, and chat app | 3rd |
+{%- endif %}
+{%- if include_evaluation == "yes" %}
+| [**evaluation**](./evaluation/README.md) | Golden-dataset curator app + trace merge job | any time |
+{%- endif %}
+
+Shared variables (`uc_catalog`, `schema`) are defined once in `global_bundle.yml` and included by every bundle.
+
+---
+
+## Project layout
+
+```
+{{ project_name }}/
+{%- if include_retriever == "yes" %}
+├── retriever/                  ← Retriever bundle
+│   ├── databricks.yml
+│   ├── data_preparation/       ← Ingestion + preprocessing notebooks
+│   ├── vector_search/          ← Vector Search index creation
+│   └── resources/
+{%- endif %}
+{%- if include_tools == "yes" %}
+├── tools/                      ← Tools bundle
+│   ├── databricks.yml
+│   ├── agent_tools/            ← UC function definitions (edit these)
+│   ├── notebooks/
+│   └── resources/
+{%- endif %}
+{%- if include_agent == "yes" %}
+├── agent/                      ← Agent bundle
+│   ├── databricks.yml
+│   ├── orchestration/          ← app.py (inference), Agent.py (registration)
+│   ├── deployment/             ← Model serving + Databricks App
+│   ├── evaluation/
+│   └── resources/
+{%- endif %}
+{%- if include_evaluation == "yes" %}
+├── evaluation/                 ← Evaluation bundle
+│   ├── databricks.yml
+│   ├── app/                    ← Curator Databricks App
+│   └── resources/
+{%- endif %}
+├── agent_config.yml            ← Source of truth for retrievers and tools (edit this)
+├── scripts/
+│   ├── generate.py             ← Generates DAB resource files from agent_config.yml
+│   └── templates/              ← Jinja2 templates for generated YAML and code stubs
+├── global_bundle.yml           ← Shared variables inherited by all bundles
+└── Makefile                    ← Wraps generate + deploy
+```
+
+---
+
+## Configuration: `agent_config.yml`
+
+`agent_config.yml` is the single source of truth for dynamic parts of the project. Edit it to add or remove retrievers and tools — the generator produces the corresponding DAB resource files and code stubs automatically.
+
+```yaml
+retrievers:
+  - name: docs
+    data_source_url: https://docs.databricks.com/en/doc-sitemap.xml
+    vs_endpoint: {{ vector_search_endpoint }}
+    vs_index: {{ project_name }}_docs_index
+    description: "Retrieves Databricks documentation"
+  # Add more retrievers here — each gets its own data prep + vector search job
+
+tools:
+  - name: execute_python_code
+    signature: "code: str"
+    return_type: "str"
+  - name: summarize
+    signature: "text: str, max_words: int"
+    return_type: "str"
+  # Add more tools here — each gets a stub in tools/agent_tools/
+```
+
+### Adding a retriever
+
+1. Append a new entry to `retrievers:` in `agent_config.yml`
+2. Run `make generate` — creates the data prep + vector search jobs in `retriever/resources/generated/`
+3. Run `make deploy TARGET=dev` to deploy and run the new pipeline
+
+### Adding a tool
+
+1. Append a new entry to `tools:` in `agent_config.yml`
+2. Run `make generate` — creates a stub in `tools/agent_tools/<name>.py` with a `TODO` marker
+3. Implement the function in the generated stub
+4. Run `make deploy TARGET=dev` for the tools bundle
+
+---
+
+## Deploy
+
+### Prerequisites
+
+- Databricks CLI v0.238.0+: `pip install databricks-cli` or `brew install databricks/tap/databricks`
+- Authenticated: `databricks configure` or set `DATABRICKS_HOST` + `DATABRICKS_TOKEN`
+
+### First-time setup
+
+```bash
+# 1. Generate DAB resource files from agent_config.yml
+make generate
+
+# 2. Deploy and run each bundle in order
+{%- if include_retriever == "yes" %}
+make deploy-retriever TARGET=dev
+{%- endif %}
+{%- if include_tools == "yes" %}
+make deploy-tools TARGET=dev
+{%- endif %}
+{%- if include_agent == "yes" %}
+make deploy-agent TARGET=dev
+{%- endif %}
+```
+
+Or deploy everything at once:
+
+```bash
+make deploy-all TARGET=dev
+```
+
+### Targets
+
+| Target | Purpose |
+|--------|---------|
+| `dev` | Default. Individual development. |
+| `staging` | Pre-production validation. CI deploys here on PR. |
+| `prod` | Production. CI deploys here on merge to main. |
+
+### Overriding variables without editing YAML
+
+```bash
+# Via CLI flag
+databricks bundle deploy -t dev --var="uc_catalog=my_catalog" --var="schema=my_schema"
+
+# Via environment variables
+BUNDLE_VAR_uc_catalog=my_catalog BUNDLE_VAR_schema=my_schema databricks bundle deploy -t dev
+```
+
+Use the same overrides when deploying each bundle so they all share the same catalog and schema.
+
+---
+
+## Development workflow
+
+```
+edit agent_config.yml       ← add a retriever or tool
+       ↓
+make generate               ← regenerates resource YAML + code stubs
+       ↓
+implement TODOs             ← fill in tool/retriever logic
+       ↓
+make deploy TARGET=dev      ← validate + upload
+       ↓
+databricks bundle run ...   ← run the job
+```
+
+---
+
+## CI/CD
+
+GitHub Actions workflows validate each bundle against `staging` and `prod` on every pull request that touches the corresponding directory.
+
+| Workflow | Triggers on changes to |
+|----------|----------------------|
+{%- if include_retriever == "yes" %}
+| `retriever-bundle-ci.yml` | `retriever/**` |
+{%- endif %}
+{%- if include_tools == "yes" %}
+| `tools-bundle-ci.yml` | `tools/**` |
+{%- endif %}
+{%- if include_agent == "yes" %}
+| `agent-bundle-ci.yml` | `agent/**` |
+{%- endif %}
+{%- if include_evaluation == "yes" %}
+| `evaluation-bundle-ci.yml` | `evaluation/**` |
+{%- endif %}
+
+Required GitHub secrets:
+
+| Secret | Used by |
+|--------|---------|
+| `STAGING_DATABRICKS_CLIENT_ID` | All bundles |
+| `STAGING_DATABRICKS_CLIENT_SECRET` | All bundles |
+| `PROD_DATABRICKS_CLIENT_ID` | All bundles |
+| `PROD_DATABRICKS_CLIENT_SECRET` | All bundles |
+
+---
+
+## Workspace
+
+- Host: `{{ databricks_host }}`
+- Catalog: `{{ uc_catalog }}`
+- Dev schema: `{{ project_name }}_dev`
+- Staging schema: `{{ project_name }}_staging`
+- Prod schema: `{{ project_name }}_prod`
