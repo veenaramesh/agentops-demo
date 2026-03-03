@@ -1,3 +1,4 @@
+{%- if include_evaluation == "yes" -%}
 command: [
   "python",
   "app.py"
@@ -10,9 +11,9 @@ env:
 
   # Unity Catalog location of both the traces and eval tables.
   - name: "UC_CATALOG"
-    value: "{{.uc_catalog}}"
+    value: "{{ uc_catalog }}"
   - name: "UC_SCHEMA"
-    value: "{{.project_name}}_dev"
+    value: "{{ project_name }}_dev"
 
   # Production traces table — the source of candidates for the golden dataset.
   - name: "TRACES_TABLE"
@@ -21,7 +22,7 @@ env:
   # Golden evaluation dataset table consumed by AgentEvaluation.py.
   # The app never writes here — MergeReviewedTraces.py does.
   - name: "EVAL_TABLE"
-    value: "{{.project_name}}_eval"
+    value: "{{ project_name }}_eval"
 
   # Staging table where reviewer decisions are collected before the merge job runs.
   - name: "REVIEW_TABLE"
@@ -41,3 +42,4 @@ env:
   # Rows displayed per page (default 25).
   - name: "PAGE_SIZE"
     value: "25"
+{%- endif -%}

@@ -1,9 +1,9 @@
-{{- if eq .include_evaluation "yes" -}}
+{%- if include_evaluation == "yes" -%}
 # Evaluation bundle: golden-dataset curator Databricks App + MergeReviewedTraces job.
 # The app lets reviewers accept/reject production traces; the merge job writes approved
 # traces into the evaluation dataset consumed by the agent bundle's AgentEvaluation task.
 bundle:
-  name: {{.project_name}}-evaluation
+  name: {{ project_name }}-evaluation
 
 include:
   - ../global_bundle.yml
@@ -21,7 +21,7 @@ variables:
     default: trace_review_queue
   eval_table:
     description: UC golden evaluation dataset table (written by MergeReviewedTraces, read by the agent bundle).
-    default: {{.project_name}}_eval
+    default: {{ project_name }}_eval
   min_approvals:
     description: Number of reviewer approvals required before a trace is promoted to the eval dataset.
     default: "1"
@@ -30,25 +30,25 @@ targets:
   dev:
     default: true
     variables:
-      schema: "{{.project_name}}_dev"
+      schema: "{{ project_name }}_dev"
     workspace:
-      host: {{.databricks_host}}
+      host: {{ databricks_host }}
 
   staging:
     variables:
-      schema: "{{.project_name}}_staging"
+      schema: "{{ project_name }}_staging"
     workspace:
-      host: {{.databricks_host}}
+      host: {{ databricks_host }}
 
   prod:
     variables:
-      schema: "{{.project_name}}_prod"
+      schema: "{{ project_name }}_prod"
     workspace:
-      host: {{.databricks_host}}
+      host: {{ databricks_host }}
 
   test:
     variables:
-      schema: "{{.project_name}}_test"
+      schema: "{{ project_name }}_test"
     workspace:
-      host: {{.databricks_host}}
-{{- end -}}
+      host: {{ databricks_host }}
+{%- endif -%}

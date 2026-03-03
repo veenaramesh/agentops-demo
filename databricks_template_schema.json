@@ -53,7 +53,7 @@
     "vector_search_endpoint": {
       "type": "string",
       "default": "vs_endpoint",
-      "description": "Vector Search endpoint name (used by retriever and/or agent bundles)",
+      "description": "Vector Search endpoint name (used by the retriever and agent bundles)",
       "order": 8,
       "skip_prompt_if": {
         "properties": {
@@ -80,5 +80,5 @@
       "order": 10
     }
   },
-  "success_message": "\n✅  Project '{{.project_name}}' created successfully!\n\nComponents included:\n{{- if eq .include_retriever \"yes\"}}  ✓ retriever   — data prep + Vector Search index{{end}}\n{{- if eq .include_tools \"yes\"}}  ✓ tools       — UC functions{{end}}\n{{- if eq .include_agent \"yes\"}}  ✓ agent       — LangGraph agent + serving + chat app{{end}}\n{{- if eq .include_evaluation \"yes\"}}  ✓ evaluation  — golden-dataset curator + merge job{{end}}\n\nDeploy in order:\n{{- if eq .include_retriever \"yes\"}}\n  cd {{.project_name}}/retriever\n  databricks bundle deploy -t dev\n  databricks bundle run data_prep_job -t dev\n  databricks bundle run vector_search_job -t dev\n{{- end}}\n{{- if eq .include_tools \"yes\"}}\n  cd {{.project_name}}/tools\n  databricks bundle deploy -t dev\n  databricks bundle run deploy_uc_functions_job -t dev\n{{- end}}\n{{- if eq .include_agent \"yes\"}}\n  cd {{.project_name}}/agent\n  databricks bundle deploy -t dev\n  databricks bundle run agent_development_job -t dev\n{{- end}}\n{{- if eq .include_evaluation \"yes\"}}\n  cd {{.project_name}}/evaluation\n  databricks bundle deploy -t dev\n{{- end}}\n\nSee README.md for full documentation.\n"
+  "success_message": "\n✅  Project '{{.project_name}}' created successfully!\n\nDeploy in order:\n{{- if eq .include_retriever \"yes\"}}\n  cd retriever\n  databricks bundle deploy -t dev\n  databricks bundle run data_prep_job -t dev\n  databricks bundle run vector_search_job -t dev\n{{- end}}\n{{- if eq .include_tools \"yes\"}}\n  cd ../tools\n  databricks bundle deploy -t dev\n  databricks bundle run deploy_uc_functions_job -t dev\n{{- end}}\n{{- if eq .include_agent \"yes\"}}\n  cd ../agent\n  databricks bundle deploy -t dev\n  databricks bundle run agent_development_job -t dev\n{{- end}}\n{{- if eq .include_evaluation \"yes\"}}\n  cd ../evaluation\n  databricks bundle deploy -t dev\n{{- end}}\n\nSee README.md for full documentation.\n"
 }
