@@ -23,6 +23,7 @@ class ToolDef(BaseModel):
     catalog: str = "main"
     schema_name: str = Field("default", alias="schema")
     description: str = ""
+    deploy: bool = True
     model_config = ConfigDict(populate_by_name=True)
 
 

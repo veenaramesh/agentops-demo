@@ -36,10 +36,11 @@ def generate_project_zip(config: dict) -> io.BytesIO:
             else:
                 zf.writestr(str(dest), src.read_bytes())
 
-        # Per-tool stub files (one .py per UC function node)
-        if config.get("include_tools") == "yes":
+        # Per-tool stub files — only for tools marked deploy=True
+        deploy_tools = [t for t in config.get("tools", []) if t.get("deploy", True)]
+        if deploy_tools:
             stub_tmpl = env.get_template("tools/agent_tools/tool_stub.py.j2")
-            for tool in config.get("tools", []):
+            for tool in deploy_tools:
                 rendered = stub_tmpl.render(tool=tool, **config).strip()
                 dest = Path(project) / "tools" / "agent_tools" / f"{tool['name']}.py"
                 zf.writestr(str(dest), rendered + "\n")

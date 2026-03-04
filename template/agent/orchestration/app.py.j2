@@ -35,8 +35,6 @@ from pydantic import BaseModel as PydanticBaseModel
 config_file = "ModelConfig.yml"
 model_config = mlflow.models.ModelConfig(development_config=config_file)
 
-uc_catalog = model_config.get("catalog")
-schema = model_config.get("schema")
 system_prompt = model_config.get("system_prompt")
 
 #####################
@@ -66,7 +64,7 @@ class AgentState(TypedDict):
 {{ worker.name }}_toolkit = UCFunctionToolkit(
     function_names=[
 {%- for t in worker.tools %}
-        f"{uc_catalog}.{schema}.{{ t.name }}",
+        "{{ t.catalog }}.{{ t.schema }}.{{ t.name }}",
 {%- endfor %}
     ]
 )
@@ -166,7 +164,7 @@ workflow.add_edge("{{ worker.name }}", "supervisor")
 {{ stage.name }}_toolkit = UCFunctionToolkit(
     function_names=[
 {%- for t in stage.tools %}
-        f"{uc_catalog}.{schema}.{{ t.name }}",
+        "{{ t.catalog }}.{{ t.schema }}.{{ t.name }}",
 {%- endfor %}
     ]
 )
@@ -235,7 +233,7 @@ workflow.add_edge("{{ stage.name }}", END)
 {{ branch.name }}_toolkit = UCFunctionToolkit(
     function_names=[
 {%- for t in branch.tools %}
-        f"{uc_catalog}.{schema}.{{ t.name }}",
+        "{{ t.catalog }}.{{ t.schema }}.{{ t.name }}",
 {%- endfor %}
     ]
 )
@@ -327,14 +325,11 @@ workflow.add_edge("aggregator", END)
 ## Single agent (ReAct loop)
 #####################
 {%- if agent_tools %}
-{% for tool in agent_tools %}
-{{ tool.name }}_fn = f"{uc_catalog}.{schema}.{{ tool.name }}"
-{%- endfor %}
 
 toolkit = UCFunctionToolkit(
     function_names=[
 {%- for tool in agent_tools %}
-        {{ tool.name }}_fn,
+        "{{ tool.catalog }}.{{ tool.schema }}.{{ tool.name }}",
 {%- endfor %}
     ]
 )

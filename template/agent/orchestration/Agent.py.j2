@@ -1,0 +1,126 @@
+# Databricks notebook source
+# MAGIC %load_ext autoreload
+# MAGIC %autoreload 2
+
+# COMMAND ----------
+
+###################################################################################
+# Agent Chain Creation
+#
+# This notebook registers the agent model with MLflow and links it to the
+# UC functions and vector search indexes drawn on the canvas.
+#
+# UC functions are deployed separately by the tools bundle
+# (tools/notebooks/DeployUCFunctions.py).  Run that bundle first.
+#
+# Parameters:
+# * uc_catalog (required)       - Unity Catalog containing deployed functions/indexes
+# * schema (required)           - Schema inside Unity Catalog
+# * experiment (required)       - MLflow experiment name
+# * registered_model (required) - Model name to register in Unity Catalog
+# * model_alias (required)      - Alias for the newly registered version
+# * bundle_root (required)      - Workspace file path for sys.path injection
+##################################################################################
+
+# COMMAND ----------
+
+dbutils.widgets.text("uc_catalog", "main",              label="Unity Catalog")
+dbutils.widgets.text("schema",     "default",           label="Schema")
+dbutils.widgets.text("experiment", "agent_experiment",  label="Experiment name")
+dbutils.widgets.text("registered_model", "agent_model", label="Registered model name")
+dbutils.widgets.text("model_alias", "champion",         label="Model Alias")
+dbutils.widgets.text("bundle_root", "/",                label="Root of bundle")
+
+# COMMAND ----------
+
+uc_catalog       = dbutils.widgets.get("uc_catalog")
+schema           = dbutils.widgets.get("schema")
+experiment       = dbutils.widgets.get("experiment")
+registered_model = dbutils.widgets.get("registered_model")
+model_alias      = dbutils.widgets.get("model_alias")
+bundle_root      = dbutils.widgets.get("bundle_root")
+
+import sys
+sys.path.append(bundle_root)
+
+# COMMAND ----------
+# DBTITLE 1, Create a model config
+
+import yaml
+
+config = {
+    "llm_config": {
+        "endpoint":    "{{ llm_model_name }}",
+        "max_tokens":  512,
+        "temperature": 0.01,
+    },
+    "system_prompt": "You are a helpful assistant.",  # TODO: customize
+}
+
+with open("ModelConfig.yml", "w") as f:
+    yaml.dump(config, f, default_flow_style=False, allow_unicode=True)
+
+# COMMAND ----------
+# DBTITLE 1, Register agent with resources
+
+import mlflow
+from mlflow.models.resources import (
+    DatabricksFunction,
+    DatabricksServingEndpoint,
+{%- if agent_retrievers %}
+    DatabricksVectorSearchIndex,
+{%- endif %}
+)
+from pkg_resources import get_distribution
+
+mlflow.set_experiment(experiment)
+
+resources = [
+    DatabricksServingEndpoint(endpoint_name="{{ llm_model_name }}"),
+{%- for tool in agent_tools %}
+    DatabricksFunction("{{ tool.catalog }}.{{ tool.schema }}.{{ tool.name }}"),
+{%- endfor %}
+{%- for retriever in agent_retrievers %}
+    DatabricksVectorSearchIndex(index_name="{{ retriever.index_name }}"),
+{%- endfor %}
+]
+
+with mlflow.start_run():
+    model_info = mlflow.pyfunc.log_model(
+        python_model="app.py",
+        name="model",
+        resources=resources,
+        pip_requirements=[
+            f"databricks-connect=={get_distribution('databricks-connect').version}",
+            f"unitycatalog-langchain=={get_distribution('unitycatalog-langchain').version}",
+            f"databricks-vectorsearch=={get_distribution('databricks-vectorsearch').version}",
+            f"databricks-langchain=={get_distribution('databricks-langchain').version}",
+            f"langgraph=={get_distribution('langgraph').version}",
+            f"mlflow=={get_distribution('mlflow').version}",
+        ],
+        model_config=config,
+    )
+
+# COMMAND ----------
+# DBTITLE 1, Register model and set alias
+
+from mlflow import MlflowClient
+
+client_mlflow       = MlflowClient()
+registered_model_name = f"{uc_catalog}.{schema}.{registered_model}"
+
+uc_registered_model_info = mlflow.register_model(
+    model_info.model_uri,
+    name=registered_model_name,
+    env_pack="databricks_model_serving",
+)
+client_mlflow.set_registered_model_alias(
+    registered_model_name,
+    model_alias,
+    uc_registered_model_info.version,
+)
+
+# COMMAND ----------
+# DBTITLE 1, Final Summary
+
+dbutils.notebook.exit("Agent registered successfully")
