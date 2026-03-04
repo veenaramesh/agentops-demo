@@ -1,0 +1,3 @@
+{%- for tool in tools %}
+from .{{ tool.name }} import {{ tool.name }}
+{%- endfor %}
