@@ -1,5 +1,6 @@
-# Vector search job: creates endpoint and index from preprocessed_data_table.
-# Run after data_prep_job so the preprocessed table exists.
+{%- if retrievers %}
+# Vector search jobs: creates endpoint and index from preprocessed_data_table.
+# Run after data_prep jobs so the preprocessed table exists.
 common_permissions: &permissions
   permissions:
     - level: CAN_VIEW
@@ -7,11 +8,12 @@ common_permissions: &permissions
 
 resources:
   jobs:
-    vector_search_job:
+{%- for retriever in retrievers %}
+    vector_search_job_{{ retriever.name }}:
       parameters:
         - name: bundle_root
           default: ${workspace.file_path}
-      name: ${bundle.target}-retriever-vector-search-job
+      name: ${bundle.target}-retriever-vector-search-job-{{ retriever.name }}
       tasks:
         - task_key: VectorSearchIndex
           notebook_task:
@@ -21,7 +23,8 @@ resources:
               uc_catalog: ${var.uc_catalog}
               schema: ${var.schema}
               preprocessed_data_table: ${var.preprocessed_data_table}
-              vector_search_endpoint: ${var.vector_search_endpoint}
+              vector_search_endpoint: {{ retriever.endpoint_name }}
+              vector_search_index: {{ retriever.index_name }}
               git_source_info: url:${bundle.git.origin_url}; branch:${bundle.git.branch}; commit:${bundle.git.commit}
           environment_key: vector_search_requirements
       <<: *permissions
@@ -32,37 +35,47 @@ resources:
             client: "3"
             dependencies:
               - "-r /Workspace/Users/${workspace.current_user.userName}/.bundle/${bundle.name}/${bundle.target}/files/vector_search/requirements.txt"
+{%- endfor %}
 
 targets:
   dev:
     resources:
       jobs:
-        vector_search_job:
+{%- for retriever in retrievers %}
+        vector_search_job_{{ retriever.name }}:
           schedule:
             quartz_cron_expression: "0 0 12 1 1/1 ? * "
             pause_status: "PAUSED"
             timezone_id: UTC
+{%- endfor %}
   test:
     resources:
       jobs:
-        vector_search_job:
+{%- for retriever in retrievers %}
+        vector_search_job_{{ retriever.name }}:
           schedule:
             quartz_cron_expression: "0 0 12 1 1/1 ? * "
             pause_status: "PAUSED"
             timezone_id: UTC
+{%- endfor %}
   prod:
     resources:
       jobs:
-        vector_search_job:
+{%- for retriever in retrievers %}
+        vector_search_job_{{ retriever.name }}:
           schedule:
             quartz_cron_expression: "0 0 12 1 1/1 ? * "
             pause_status: "UNPAUSED"
             timezone_id: UTC
+{%- endfor %}
   staging:
     resources:
       jobs:
-        vector_search_job:
+{%- for retriever in retrievers %}
+        vector_search_job_{{ retriever.name }}:
           schedule:
             quartz_cron_expression: "0 0 12 1 1/1 ? * "
             pause_status: "UNPAUSED"
             timezone_id: UTC
+{%- endfor %}
+{%- endif %}

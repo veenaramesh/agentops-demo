@@ -1,0 +1,51 @@
+{%- if tools %}
+# Databricks notebook source
+# MAGIC %load_ext autoreload
+# MAGIC %autoreload 2
+
+# COMMAND ----------
+
+# Deploys UC functions used by the agent.
+# Run this job from the tools bundle so the agent bundle can reference these tools by name.
+
+# COMMAND ----------
+
+dbutils.widgets.text("uc_catalog", "main", "Unity Catalog")
+dbutils.widgets.text("schema", "agentops_dab_demo", "Schema")
+
+uc_catalog = dbutils.widgets.get("uc_catalog")
+schema = dbutils.widgets.get("schema")
+
+# COMMAND ----------
+
+from unitycatalog.ai.core.base import set_uc_function_client
+from unitycatalog.ai.core.databricks import DatabricksFunctionClient
+from agent_tools import (
+{%- for tool in tools %}
+    {{ tool.name }},
+{%- endfor %}
+)
+
+client = DatabricksFunctionClient()
+set_uc_function_client(client)
+
+# COMMAND ----------
+
+{%- for tool in tools %}
+# Create Python UDF: {{ tool.name }}
+client.create_python_function(
+    func={{ tool.name }},
+    catalog=uc_catalog,
+    schema=schema,
+    replace=True,
+)
+
+# COMMAND ----------
+
+{%- endfor %}
+
+dbutils.notebook.exit(
+    f"UC functions created in {uc_catalog}.{schema}: "
+    "{{ tools | map(attribute='name') | join(', ') }}"
+)
+{%- endif %}

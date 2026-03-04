@@ -1,5 +1,6 @@
-# Data preparation job: ingestion + preprocessing only.
-# Writes raw_data_table and preprocessed_data_table. Run before vector_search_job.
+{%- if retrievers %}
+# Data preparation jobs: ingestion + preprocessing, one job per retriever.
+# Writes raw_data_table and preprocessed_data_table. Run before vector_search jobs.
 common_permissions: &permissions
   permissions:
     - level: CAN_VIEW
@@ -7,11 +8,12 @@ common_permissions: &permissions
 
 resources:
   jobs:
-    data_prep_job:
+{%- for retriever in retrievers %}
+    data_prep_job_{{ retriever.name }}:
       parameters:
         - name: bundle_root
           default: ${workspace.file_path}
-      name: ${bundle.target}-retriever-data-prep-job
+      name: ${bundle.target}-retriever-data-prep-job-{{ retriever.name }}
       tasks:
         - task_key: RawDataIngest
           notebook_task:
@@ -20,7 +22,7 @@ resources:
               uc_catalog: ${var.uc_catalog}
               schema: ${var.schema}
               raw_data_table: ${var.raw_data_table}
-              data_source_url: https://docs.databricks.com/en/doc-sitemap.xml
+              data_source_url: # TODO: set your data source URL for {{ retriever.name }}
               git_source_info: url:${bundle.git.origin_url}; branch:${bundle.git.branch}; commit:${bundle.git.commit}
           environment_key: data_prep_requirements
 
@@ -48,37 +50,47 @@ resources:
             client: "3"
             dependencies:
               - "-r /Workspace/Users/${workspace.current_user.userName}/.bundle/${bundle.name}/${bundle.target}/files/data_preparation/requirements.txt"
+{%- endfor %}
 
 targets:
   dev:
     resources:
       jobs:
-        data_prep_job:
+{%- for retriever in retrievers %}
+        data_prep_job_{{ retriever.name }}:
           schedule:
             quartz_cron_expression: "0 0 12 1 1/1 ? * "
             pause_status: "PAUSED"
             timezone_id: UTC
+{%- endfor %}
   test:
     resources:
       jobs:
-        data_prep_job:
+{%- for retriever in retrievers %}
+        data_prep_job_{{ retriever.name }}:
           schedule:
             quartz_cron_expression: "0 0 12 1 1/1 ? * "
             pause_status: "PAUSED"
             timezone_id: UTC
+{%- endfor %}
   prod:
     resources:
       jobs:
-        data_prep_job:
+{%- for retriever in retrievers %}
+        data_prep_job_{{ retriever.name }}:
           schedule:
             quartz_cron_expression: "0 0 12 1 1/1 ? * "
             pause_status: "UNPAUSED"
             timezone_id: UTC
+{%- endfor %}
   staging:
     resources:
       jobs:
-        data_prep_job:
+{%- for retriever in retrievers %}
+        data_prep_job_{{ retriever.name }}:
           schedule:
             quartz_cron_expression: "0 0 12 1 1/1 ? * "
             pause_status: "UNPAUSED"
             timezone_id: UTC
+{%- endfor %}
+{%- endif %}

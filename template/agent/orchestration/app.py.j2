@@ -1,0 +1,533 @@
+import json
+import operator
+from typing import Annotated, Any, Generator, Literal, Optional, Sequence, TypedDict, Union
+from uuid import uuid4
+
+import mlflow
+from databricks_langchain import (
+    ChatDatabricks,
+    UCFunctionToolkit,
+    VectorSearchRetrieverTool,
+)
+from langchain_core.language_models import LanguageModelLike
+from langchain_core.messages import (
+    AIMessage,
+    AIMessageChunk,
+    BaseMessage,
+    convert_to_openai_messages,
+)
+from langchain_core.runnables import RunnableConfig, RunnableLambda
+from langchain_core.tools import BaseTool, tool
+from langgraph.graph import END, START, StateGraph
+from langgraph.graph.message import add_messages
+from langgraph.prebuilt import create_react_agent
+from langgraph.types import Send
+from langgraph.prebuilt.tool_node import ToolNode
+from mlflow.entities import SpanType
+from mlflow.pyfunc import ResponsesAgent
+from mlflow.types.responses import (
+    ResponsesAgentRequest,
+    ResponsesAgentResponse,
+    ResponsesAgentStreamEvent,
+)
+from pydantic import BaseModel as PydanticBaseModel
+
+config_file = "ModelConfig.yml"
+model_config = mlflow.models.ModelConfig(development_config=config_file)
+
+uc_catalog = model_config.get("catalog")
+schema = model_config.get("schema")
+system_prompt = model_config.get("system_prompt")
+
+#####################
+## Agent state
+#####################
+
+class AgentState(TypedDict):
+    messages: Annotated[Sequence[BaseMessage], add_messages]
+    branch_results: Annotated[list[str], operator.add]  # parallel fan-out accumulator
+    next: Optional[str]                                  # supervisor routing
+    custom_inputs: Optional[dict[str, Any]]
+    custom_outputs: Optional[dict[str, Any]]
+
+{% if workflow_pattern == "supervisor_worker" %}
+#####################
+## Supervisor / Worker
+#####################
+{% for worker in worker_llms %}
+# ── Worker: {{ worker.name }} ─────────────────────────────────────────────────
+{{ worker.name }}_model = ChatDatabricks(
+    endpoint="{{ worker.endpoint_name }}",
+    temperature=model_config.get("llm_config").get("temperature"),
+    max_tokens=model_config.get("llm_config").get("max_tokens"),
+)
+{%- if worker.tools %}
+
+{{ worker.name }}_toolkit = UCFunctionToolkit(
+    function_names=[
+{%- for t in worker.tools %}
+        f"{uc_catalog}.{schema}.{{ t.name }}",
+{%- endfor %}
+    ]
+)
+{{ worker.name }}_uc_tools = {{ worker.name }}_toolkit.tools
+{%- else %}
+
+{{ worker.name }}_uc_tools = []
+{%- endif %}
+{% for retriever in worker.retrievers %}
+@tool
+def {{ worker.name }}_retrieve_{{ retriever.name }}(query: str) -> str:
+    """Retrieve from {{ retriever.name }} for {{ worker.name }}."""
+    vs_tool = VectorSearchRetrieverTool(
+        index_name="{{ retriever.index_name }}",
+        tool_name="{{ worker.name }}_{{ retriever.name }}_retriever",
+        tool_description="Retrieves information from {{ retriever.name }}.",
+        num_results={{ retriever.num_results }},
+        columns={{ retriever.columns.split(",") | list | tojson }},
+    )
+    response = vs_tool.invoke(query)
+    return f"{response[0].metadata.get('url', '')}  \n{response[0].page_content}"
+{% endfor %}
+{{ worker.name }}_tools = {{ worker.name }}_uc_tools + [{% for r in worker.retrievers %}{{ worker.name }}_retrieve_{{ r.name }}{% if not loop.last %}, {% endif %}{% endfor %}]
+{% endfor %}
+# ── Supervisor LLM ────────────────────────────────────────────────────────────
+supervisor_model = ChatDatabricks(
+    endpoint="{{ supervisor_llm.endpoint_name }}",
+    temperature=model_config.get("llm_config").get("temperature"),
+    max_tokens=model_config.get("llm_config").get("max_tokens"),
+)
+
+# Routing schema — supervisor picks the next worker or signals FINISH
+class RouteDecision(PydanticBaseModel):
+    next: Literal[{% for w in worker_llms %}"{{ w.name }}", {% endfor %}"FINISH"]
+
+# ── Worker sub-agents (each runs its own ReAct loop) ─────────────────────────
+{% for worker in worker_llms %}
+_{{ worker.name }}_agent = create_react_agent({{ worker.name }}_model, {{ worker.name }}_tools)
+
+def {{ worker.name }}_node(state: AgentState, config: RunnableConfig):
+    result = _{{ worker.name }}_agent.invoke({"messages": state["messages"]}, config)
+    # Return only newly generated messages (create_react_agent includes the input)
+    return {"messages": result["messages"][len(state["messages"]):]}
+{% endfor %}
+# ── Supervisor node ───────────────────────────────────────────────────────────
+def supervisor_node(state: AgentState, config: RunnableConfig):
+    worker_info = "\n".join([
+{%- for w in worker_llms %}
+        "- {{ w.name }}: handles {{ w.tools | map(attribute='name') | join(', ') or 'general tasks' }}{% if w.retrievers %}, retrieves from {{ w.retrievers | map(attribute='name') | join(', ') }}{% endif %}",
+{%- endfor %}
+    ])
+    base_system = (
+        "You are a supervisor managing these specialized workers:\n"
+        f"{worker_info}\n"
+        "Route the task to the right worker, or return FINISH when the task is complete."
+    )
+    sys_msg = (system_prompt + "\n\n" + base_system) if system_prompt else base_system
+    msgs = [{"role": "system", "content": sys_msg}] + list(state["messages"])
+    structured = supervisor_model.with_structured_output(RouteDecision)
+    decision = structured.invoke(msgs)
+    return {"next": decision.next}
+
+# ── Graph ─────────────────────────────────────────────────────────────────────
+workflow = StateGraph(AgentState)
+workflow.add_node("supervisor", RunnableLambda(supervisor_node))
+{% for worker in worker_llms %}
+workflow.add_node("{{ worker.name }}", RunnableLambda({{ worker.name }}_node))
+{% endfor %}
+workflow.set_entry_point("supervisor")
+workflow.add_conditional_edges(
+    "supervisor",
+    lambda state: state["next"],
+    {
+{%- for worker in worker_llms %}
+        "{{ worker.name }}": "{{ worker.name }}",
+{%- endfor %}
+        "FINISH": END,
+    },
+)
+{% for worker in worker_llms %}
+workflow.add_edge("{{ worker.name }}", "supervisor")
+{% endfor %}
+
+{% elif workflow_pattern == "sequential" %}
+#####################
+## Sequential pipeline
+#####################
+{% for stage in pipeline_stages %}
+# ── Stage {{ loop.index }}: {{ stage.name }} ─────────────────────────────────────────────────
+{{ stage.name }}_model = ChatDatabricks(
+    endpoint="{{ stage.endpoint_name }}",
+    temperature=model_config.get("llm_config").get("temperature"),
+    max_tokens=model_config.get("llm_config").get("max_tokens"),
+)
+{%- if stage.tools %}
+
+{{ stage.name }}_toolkit = UCFunctionToolkit(
+    function_names=[
+{%- for t in stage.tools %}
+        f"{uc_catalog}.{schema}.{{ t.name }}",
+{%- endfor %}
+    ]
+)
+{{ stage.name }}_uc_tools = {{ stage.name }}_toolkit.tools
+{%- else %}
+
+{{ stage.name }}_uc_tools = []
+{%- endif %}
+{% for retriever in stage.retrievers %}
+@tool
+def {{ stage.name }}_retrieve_{{ retriever.name }}(query: str) -> str:
+    """Retrieve from {{ retriever.name }} for {{ stage.name }}."""
+    vs_tool = VectorSearchRetrieverTool(
+        index_name="{{ retriever.index_name }}",
+        tool_name="{{ stage.name }}_{{ retriever.name }}_retriever",
+        tool_description="Retrieves information from {{ retriever.name }}.",
+        num_results={{ retriever.num_results }},
+        columns={{ retriever.columns.split(",") | list | tojson }},
+    )
+    response = vs_tool.invoke(query)
+    return f"{response[0].metadata.get('url', '')}  \n{response[0].page_content}"
+{% endfor %}
+{{ stage.name }}_tools = {{ stage.name }}_uc_tools + [{% for r in stage.retrievers %}{{ stage.name }}_retrieve_{{ r.name }}{% if not loop.last %}, {% endif %}{% endfor %}]
+{% endfor %}
+
+# ── Stage nodes ───────────────────────────────────────────────────────────────
+{% for stage in pipeline_stages %}
+_{{ stage.name }}_agent = create_react_agent({{ stage.name }}_model, {{ stage.name }}_tools)
+
+def {{ stage.name }}_node(state: AgentState, config: RunnableConfig):
+    """Pipeline stage {{ loop.index }}/{{ pipeline_stages | length }}: {{ stage.name }}.
+    Receives all prior messages; returns only newly generated messages."""
+    result = _{{ stage.name }}_agent.invoke({"messages": state["messages"]}, config)
+    return {"messages": result["messages"][len(state["messages"]):]}
+{% endfor %}
+
+# ── Graph (linear chain) ──────────────────────────────────────────────────────
+workflow = StateGraph(AgentState)
+{% for stage in pipeline_stages %}
+workflow.add_node("{{ stage.name }}", RunnableLambda({{ stage.name }}_node))
+{%- endfor %}
+
+workflow.set_entry_point("{{ pipeline_stages[0].name }}")
+{% for stage in pipeline_stages %}
+{%- if not loop.last %}
+workflow.add_edge("{{ stage.name }}", "{{ pipeline_stages[loop.index].name }}")
+{%- else %}
+workflow.add_edge("{{ stage.name }}", END)
+{%- endif %}
+{% endfor %}
+
+{% elif workflow_pattern == "parallel" %}
+#####################
+## Parallel fan-out
+#####################
+
+{% for branch in parallel_branches %}
+# ── Branch: {{ branch.name }} ────────────────────────────────────────────────
+{{ branch.name }}_model = ChatDatabricks(
+    endpoint="{{ branch.endpoint_name }}",
+    temperature=model_config.get("llm_config").get("temperature"),
+    max_tokens=model_config.get("llm_config").get("max_tokens"),
+)
+{%- if branch.tools %}
+
+{{ branch.name }}_toolkit = UCFunctionToolkit(
+    function_names=[
+{%- for t in branch.tools %}
+        f"{uc_catalog}.{schema}.{{ t.name }}",
+{%- endfor %}
+    ]
+)
+{{ branch.name }}_uc_tools = {{ branch.name }}_toolkit.tools
+{%- else %}
+
+{{ branch.name }}_uc_tools = []
+{%- endif %}
+{% for retriever in branch.retrievers %}
+@tool
+def {{ branch.name }}_retrieve_{{ retriever.name }}(query: str) -> str:
+    """Retrieve from {{ retriever.name }} for {{ branch.name }}."""
+    vs_tool = VectorSearchRetrieverTool(
+        index_name="{{ retriever.index_name }}",
+        tool_name="{{ branch.name }}_{{ retriever.name }}_retriever",
+        tool_description="Retrieves information from {{ retriever.name }}.",
+        num_results={{ retriever.num_results }},
+        columns={{ retriever.columns.split(",") | list | tojson }},
+    )
+    response = vs_tool.invoke(query)
+    return f"{response[0].metadata.get('url', '')}  \n{response[0].page_content}"
+{% endfor %}
+{{ branch.name }}_tools = {{ branch.name }}_uc_tools + [{% for r in branch.retrievers %}{{ branch.name }}_retrieve_{{ r.name }}{% if not loop.last %}, {% endif %}{% endfor %}]
+{% endfor %}
+
+# Aggregator: synthesizes results from all branches into one final answer
+aggregator_model = ChatDatabricks(
+    endpoint=model_config.get("llm_config").get("endpoint"),
+    temperature=model_config.get("llm_config").get("temperature"),
+    max_tokens=model_config.get("llm_config").get("max_tokens"),
+)
+
+# BranchState: passed to each branch via Send (subset of AgentState)
+class BranchState(TypedDict):
+    messages: Sequence[BaseMessage]
+
+# ── Branch nodes (run in parallel) ───────────────────────────────────────────
+{% for branch in parallel_branches %}
+_{{ branch.name }}_agent = create_react_agent({{ branch.name }}_model, {{ branch.name }}_tools)
+
+def {{ branch.name }}_node(state: BranchState) -> dict:
+    """Parallel branch {{ loop.index }}/{{ parallel_branches | length }}: {{ branch.name }}."""
+    result = _{{ branch.name }}_agent.invoke(dict(state))
+    last = result["messages"][-1]
+    content = last.content if hasattr(last, "content") else str(last)
+    return {"branch_results": [f"[{{ branch.name }}] {content}"]}
+{% endfor %}
+
+def fan_out(state: AgentState) -> list[Send]:
+    """Dispatch to all branches in parallel."""
+    return [
+{%- for branch in parallel_branches %}
+        Send("{{ branch.name }}", {"messages": state["messages"]}),
+{%- endfor %}
+    ]
+
+def aggregator_node(state: AgentState, config: RunnableConfig):
+    """Synthesize parallel branch results into a single final answer."""
+    combined = "\n\n".join(state["branch_results"])
+    msgs = list(state["messages"]) + [
+        {
+            "role": "user",
+            "content": (
+                "Multiple specialized agents have provided these results in parallel:\n\n"
+                f"{combined}\n\n"
+                "Synthesize them into a single, coherent final answer."
+            ),
+        }
+    ]
+    response = aggregator_model.invoke(msgs)
+    return {"messages": [response]}
+
+# ── Graph (fan-out → parallel branches → aggregator) ─────────────────────────
+workflow = StateGraph(AgentState)
+{% for branch in parallel_branches %}
+workflow.add_node("{{ branch.name }}", {{ branch.name }}_node)
+{%- endfor %}
+workflow.add_node("aggregator", RunnableLambda(aggregator_node))
+
+# START dispatches to all branches simultaneously via Send
+workflow.add_conditional_edges(START, fan_out, [{% for branch in parallel_branches %}"{{ branch.name }}"{% if not loop.last %}, {% endif %}{% endfor %}])
+{% for branch in parallel_branches %}
+workflow.add_edge("{{ branch.name }}", "aggregator")
+{%- endfor %}
+workflow.add_edge("aggregator", END)
+
+{% else %}
+#####################
+## Single agent (ReAct loop)
+#####################
+{%- if agent_tools %}
+{% for tool in agent_tools %}
+{{ tool.name }}_fn = f"{uc_catalog}.{schema}.{{ tool.name }}"
+{%- endfor %}
+
+toolkit = UCFunctionToolkit(
+    function_names=[
+{%- for tool in agent_tools %}
+        {{ tool.name }}_fn,
+{%- endfor %}
+    ]
+)
+uc_tools = toolkit.tools
+{%- else %}
+uc_tools = []
+{%- endif %}
+{% for retriever in agent_retrievers %}
+@tool
+def retrieve_{{ retriever.name }}(query: str) -> str:
+    """Retrieve from {{ retriever.name }} using the query."""
+    vs_tool = VectorSearchRetrieverTool(
+        index_name="{{ retriever.index_name }}",
+        tool_name="{{ retriever.name }}_retriever",
+        tool_description="Retrieves information from {{ retriever.name }}.",
+        num_results={{ retriever.num_results }},
+        columns={{ retriever.columns.split(",") | list | tojson }},
+    )
+    response = vs_tool.invoke(query)
+    return f"{response[0].metadata.get('url', '')}  \n{response[0].page_content}"
+{% endfor %}
+tools = uc_tools + [{% for retriever in agent_retrievers %}retrieve_{{ retriever.name }}{% if not loop.last %}, {% endif %}{% endfor %}]
+
+model = ChatDatabricks(
+    endpoint=model_config.get("llm_config").get("endpoint"),
+    temperature=model_config.get("llm_config").get("temperature"),
+    max_tokens=model_config.get("llm_config").get("max_tokens"),
+)
+
+
+def create_tool_calling_agent(
+    model: LanguageModelLike,
+    tools: Union[ToolNode, Sequence[BaseTool]],
+    system_prompt: Optional[str] = None,
+):
+    model = model.bind_tools(tools)
+
+    def should_continue(state: AgentState):
+        last_message = state["messages"][-1]
+        if isinstance(last_message, AIMessage) and last_message.tool_calls:
+            return "continue"
+        return "end"
+
+    preprocessor = (
+        RunnableLambda(lambda state: [{"role": "system", "content": system_prompt}] + state["messages"])
+        if system_prompt
+        else RunnableLambda(lambda state: state["messages"])
+    )
+    model_runnable = preprocessor | model
+
+    def call_model(state: AgentState, config: RunnableConfig):
+        return {"messages": [model_runnable.invoke(state, config)]}
+
+    workflow = StateGraph(AgentState)
+    workflow.add_node("agent", RunnableLambda(call_model))
+    workflow.add_node("tools", ToolNode(tools))
+    workflow.set_entry_point("agent")
+    workflow.add_conditional_edges(
+        "agent", should_continue, {"continue": "tools", "end": END}
+    )
+    workflow.add_edge("tools", "agent")
+    return workflow.compile()
+
+{% endif %}
+
+#####################
+## ResponsesAgent wrapper
+#####################
+
+class LangGraphResponsesAgent(ResponsesAgent):
+    def __init__(self, agent):
+        self.agent = agent
+
+    def _responses_to_cc(self, message: dict[str, Any]) -> list[dict[str, Any]]:
+        """Convert from a Responses API output item to ChatCompletion messages."""
+        msg_type = message.get("type")
+        if msg_type == "function_call":
+            return [
+                {
+                    "role": "assistant",
+                    "content": "tool call",
+                    "tool_calls": [
+                        {
+                            "id": message["call_id"],
+                            "type": "function",
+                            "function": {
+                                "arguments": message["arguments"],
+                                "name": message["name"],
+                            },
+                        }
+                    ],
+                }
+            ]
+        elif msg_type == "message" and isinstance(message["content"], list):
+            return [
+                {"role": message["role"], "content": content["text"]}
+                for content in message["content"]
+            ]
+        elif msg_type == "reasoning":
+            return [{"role": "assistant", "content": json.dumps(message["summary"])}]
+        elif msg_type == "function_call_output":
+            return [
+                {
+                    "role": "tool",
+                    "content": message["output"],
+                    "tool_call_id": message["call_id"],
+                }
+            ]
+        compatible_keys = ["role", "content", "name", "tool_calls", "tool_call_id"]
+        filtered = {k: v for k, v in message.items() if k in compatible_keys}
+        return [filtered] if filtered else []
+
+    def _prep_msgs_for_cc_llm(self, responses_input) -> list[dict[str, Any]]:
+        cc_msgs = []
+        for msg in responses_input:
+            cc_msgs.extend(self._responses_to_cc(msg.model_dump()))
+
+    def _langchain_to_responses(self, messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        for message in messages:
+            message = message.model_dump()
+            role = message["type"]
+            if role == "ai":
+                if tool_calls := message.get("tool_calls"):
+                    return [
+                        self.create_function_call_item(
+                            id=message.get("id") or str(uuid4()),
+                            call_id=tool_call["id"],
+                            name=tool_call["name"],
+                            arguments=json.dumps(tool_call["args"]),
+                        )
+                        for tool_call in tool_calls
+                    ]
+                else:
+                    return [
+                        self.create_text_output_item(
+                            text=message["content"],
+                            id=message.get("id") or str(uuid4()),
+                        )
+                    ]
+            elif role == "tool":
+                return [
+                    self.create_function_call_output_item(
+                        call_id=message["tool_call_id"],
+                        output=message["content"],
+                    )
+                ]
+            elif role == "user":
+                return [message]
+
+    def predict(self, request: ResponsesAgentRequest) -> ResponsesAgentResponse:
+        outputs = [
+            event.item
+            for event in self.predict_stream(request)
+            if event.type == "response.output_item.done"
+        ]
+        return ResponsesAgentResponse(output=outputs, custom_outputs=request.custom_inputs)
+
+    def predict_stream(
+        self,
+        request: ResponsesAgentRequest,
+    ) -> Generator[ResponsesAgentStreamEvent, None, None]:
+        cc_msgs = []
+        for msg in request.input:
+            cc_msgs.extend(self._responses_to_cc(msg.model_dump()))
+
+        initial_state = {"messages": cc_msgs, "next": None, "branch_results": []}
+        for event in self.agent.stream(initial_state, stream_mode=["updates", "messages"]):
+            if event[0] == "updates":
+                for node_data in event[1].values():
+                    if "messages" not in node_data:
+                        continue
+                    for item in self._langchain_to_responses(node_data["messages"]):
+                        yield ResponsesAgentStreamEvent(type="response.output_item.done", item=item)
+            elif event[0] == "messages":
+                try:
+                    chunk = event[1][0]
+                    if isinstance(chunk, AIMessageChunk) and (content := chunk.content):
+                        yield ResponsesAgentStreamEvent(
+                            **self.create_text_delta(delta=content, item_id=chunk.id),
+                        )
+                except Exception as e:
+                    print(e)
+
+
+#####################
+## Registration
+#####################
+
+mlflow.langchain.autolog()
+{% if workflow_pattern in ("supervisor_worker", "sequential", "parallel") %}
+agent = workflow.compile()
+{% else %}
+agent = create_tool_calling_agent(model, tools, system_prompt)
+{% endif %}
+AGENT = LangGraphResponsesAgent(agent)
+mlflow.models.set_model(AGENT)
