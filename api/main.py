@@ -44,6 +44,7 @@ class WorkerLLMDef(BaseModel):
     name: str
     endpoint_name: str
     model: str = ""
+    max_iterations: int = 10
     tools: list[ToolDef] = []
     retrievers: list[RetrieverDef] = []
 
@@ -51,12 +52,14 @@ class WorkerLLMDef(BaseModel):
 class SupervisorLLMDef(BaseModel):
     endpoint_name: str
     model: str = ""
+    max_iterations: int = 10
 
 
 class PipelineLLMDef(BaseModel):
     name: str
     endpoint_name: str
     model: str = ""
+    max_iterations: int = 10
     tools: list[ToolDef] = []
     retrievers: list[RetrieverDef] = []
 
@@ -65,6 +68,7 @@ class ParallelBranchDef(BaseModel):
     name: str
     endpoint_name: str
     model: str = ""
+    max_iterations: int = 10
     tools: list[ToolDef] = []
     retrievers: list[RetrieverDef] = []
 
@@ -79,6 +83,7 @@ class BundleConfig(BaseModel):
     include_evaluation: str
     vector_search_endpoint: str
     llm_model_name: str
+    llm_max_iterations: int = 10
     github_runner_group: str
     tools: list[ToolDef] = []
     retrievers: list[RetrieverDef] = []

@@ -103,9 +103,13 @@ class RouteDecision(PydanticBaseModel):
 # ── Worker sub-agents (each runs its own ReAct loop) ─────────────────────────
 {% for worker in worker_llms %}
 _{{ worker.name }}_agent = create_react_agent({{ worker.name }}_model, {{ worker.name }}_tools)
+_{{ worker.name }}_recursion_limit = {{ worker.max_iterations }} * 2 + 1
 
 def {{ worker.name }}_node(state: AgentState, config: RunnableConfig):
-    result = _{{ worker.name }}_agent.invoke({"messages": state["messages"]}, config)
+    result = _{{ worker.name }}_agent.invoke(
+        {"messages": state["messages"]},
+        config={"recursion_limit": _{{ worker.name }}_recursion_limit},
+    )
     # Return only newly generated messages (create_react_agent includes the input)
     return {"messages": result["messages"][len(state["messages"]):]}
 {% endfor %}
@@ -193,11 +197,15 @@ def {{ stage.name }}_retrieve_{{ retriever.name }}(query: str) -> str:
 # ── Stage nodes ───────────────────────────────────────────────────────────────
 {% for stage in pipeline_stages %}
 _{{ stage.name }}_agent = create_react_agent({{ stage.name }}_model, {{ stage.name }}_tools)
+_{{ stage.name }}_recursion_limit = {{ stage.max_iterations }} * 2 + 1
 
 def {{ stage.name }}_node(state: AgentState, config: RunnableConfig):
     """Pipeline stage {{ loop.index }}/{{ pipeline_stages | length }}: {{ stage.name }}.
     Receives all prior messages; returns only newly generated messages."""
-    result = _{{ stage.name }}_agent.invoke({"messages": state["messages"]}, config)
+    result = _{{ stage.name }}_agent.invoke(
+        {"messages": state["messages"]},
+        config={"recursion_limit": _{{ stage.name }}_recursion_limit},
+    )
     return {"messages": result["messages"][len(state["messages"]):]}
 {% endfor %}
 
@@ -273,10 +281,14 @@ class BranchState(TypedDict):
 # ── Branch nodes (run in parallel) ───────────────────────────────────────────
 {% for branch in parallel_branches %}
 _{{ branch.name }}_agent = create_react_agent({{ branch.name }}_model, {{ branch.name }}_tools)
+_{{ branch.name }}_recursion_limit = {{ branch.max_iterations }} * 2 + 1
 
 def {{ branch.name }}_node(state: BranchState) -> dict:
     """Parallel branch {{ loop.index }}/{{ parallel_branches | length }}: {{ branch.name }}."""
-    result = _{{ branch.name }}_agent.invoke(dict(state))
+    result = _{{ branch.name }}_agent.invoke(
+        dict(state),
+        config={"recursion_limit": _{{ branch.name }}_recursion_limit},
+    )
     last = result["messages"][-1]
     content = last.content if hasattr(last, "content") else str(last)
     return {"branch_results": [f"[{{ branch.name }}] {content}"]}
@@ -495,8 +507,26 @@ class LangGraphResponsesAgent(ResponsesAgent):
         for msg in request.input:
             cc_msgs.extend(self._responses_to_cc(msg.model_dump()))
 
+        max_iter = model_config.get("llm_max_iterations") or 10
+        # Outer recursion limit depends on the workflow pattern:
+        # - single: max_iter tool-call rounds → max_iter * 2 + 1 graph steps
+        # - supervisor_worker: supervisor routes across {{ worker_llms | length }} worker(s),
+        #   each worker handles its own inner limit; outer limit covers routing decisions
+        # - sequential / parallel: outer graph is linear (won't hit limit);
+        #   each inner agent has its own limit set at invocation time
+{% if workflow_pattern == "single" %}
+        outer_recursion_limit = max_iter * 2 + 1
+{% elif workflow_pattern == "supervisor_worker" %}
+        outer_recursion_limit = max_iter * {{ worker_llms | length }} * 2 + 1
+{% else %}
+        outer_recursion_limit = 50  # linear outer graph; inner agents have per-agent limits
+{% endif %}
         initial_state = {"messages": cc_msgs, "next": None, "branch_results": []}
-        for event in self.agent.stream(initial_state, stream_mode=["updates", "messages"]):
+        for event in self.agent.stream(
+            initial_state,
+            stream_mode=["updates", "messages"],
+            config={"recursion_limit": outer_recursion_limit},
+        ):
             if event[0] == "updates":
                 for node_data in event[1].values():
                     if "messages" not in node_data:
