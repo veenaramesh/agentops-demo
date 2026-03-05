@@ -35,6 +35,12 @@ from pydantic import BaseModel as PydanticBaseModel
 from langchain.agents import create_agent
 from langgraph_supervisor import create_supervisor
 {% endif %}
+{% if has_lakebase %}
+from typing import AsyncGenerator
+from uuid_utils import uuid7
+from mlflow.genai.agent_server import invoke, stream
+from databricks_langchain import AsyncCheckpointSaver
+{% endif %}
 
 config_file = "ModelConfig.yml"
 model_config = mlflow.models.ModelConfig(development_config=config_file)
@@ -358,11 +364,11 @@ model = ChatDatabricks(
 )
 
 
-def create_tool_calling_agent(
+def _build_agent_workflow(
     model: LanguageModelLike,
     tools: Union[ToolNode, Sequence[BaseTool]],
     system_prompt: Optional[str] = None,
-):
+) -> StateGraph:
     model = model.bind_tools(tools)
 
     def should_continue(state: AgentState):
@@ -381,20 +387,23 @@ def create_tool_calling_agent(
     def call_model(state: AgentState, config: RunnableConfig):
         return {"messages": [model_runnable.invoke(state, config)]}
 
-    workflow = StateGraph(AgentState)
-    workflow.add_node("agent", RunnableLambda(call_model))
-    workflow.add_node("tools", ToolNode(tools))
-    workflow.set_entry_point("agent")
-    workflow.add_conditional_edges(
+    wf = StateGraph(AgentState)
+    wf.add_node("agent", RunnableLambda(call_model))
+    wf.add_node("tools", ToolNode(tools))
+    wf.set_entry_point("agent")
+    wf.add_conditional_edges(
         "agent", should_continue, {"continue": "tools", "end": END}
     )
-    workflow.add_edge("tools", "agent")
-    return workflow.compile()
+    wf.add_edge("tools", "agent")
+    return wf
+
+workflow = _build_agent_workflow(model, tools, system_prompt)
 
 {% endif %}
 
+{% if not has_lakebase %}
 #####################
-## ResponsesAgent wrapper
+## ResponsesAgent wrapper  (sync, no checkpointing)
 #####################
 
 class LangGraphResponsesAgent(ResponsesAgent):
@@ -464,19 +473,89 @@ class LangGraphResponsesAgent(ResponsesAgent):
 {% endif %}
             if new_msgs:
                 yield from output_to_responses_items_stream(new_msgs)
+{% endif %}
+{% if has_lakebase %}
+#####################
+## Lakebase: async per-request agent (conversation checkpointing)
+#####################
 
+_max_iter = model_config.get("llm_max_iterations") or 10
+{% if workflow_pattern == "single" %}
+_outer_recursion_limit = _max_iter * 2 + 1
+{% elif workflow_pattern == "supervisor_worker" %}
+_outer_recursion_limit = _max_iter * {{ worker_llms | length }} * 2 + 1
+{% else %}
+_outer_recursion_limit = 50
+{% endif %}
+
+def _get_thread_id(request: ResponsesAgentRequest) -> str:
+    """Priority: custom_inputs.conversation_id → new uuid7 per request."""
+    custom_inputs = request.custom_inputs or {}
+    if "conversation_id" in custom_inputs:
+        return custom_inputs["conversation_id"]
+    return str(uuid7())
+
+
+@stream()
+async def predict_stream(
+    request: ResponsesAgentRequest,
+) -> AsyncGenerator[ResponsesAgentStreamEvent, None]:
+    cc_msgs = to_chat_completions_input([i.model_dump() for i in request.input])
+    thread_id = _get_thread_id(request)
+    seen_ids: set = set()
+    first_message = True
+
+    async with AsyncCheckpointSaver(instance_name="{{ lakebase_instance_name }}") as checkpointer:
+        _compiled = workflow.compile(checkpointer=checkpointer)
+        async for _, events in _compiled.astream(
+            {"messages": cc_msgs},
+            stream_mode=["updates"],
+            config={
+                "configurable": {"thread_id": thread_id},
+                "recursion_limit": _outer_recursion_limit,
+            },
+        ):
+            new_msgs = [
+                msg
+                for v in events.values()
+                for msg in v.get("messages", [])
+                if msg.id not in seen_ids
+            ]
+            if first_message:
+                seen_ids.update(msg.id for msg in new_msgs[: len(cc_msgs)])
+                new_msgs = new_msgs[len(cc_msgs):]
+                first_message = False
+            else:
+                seen_ids.update(msg.id for msg in new_msgs)
+{% if workflow_pattern == "supervisor_worker" %}
+            node_name = next(iter(events.keys()), None)
+            if node_name:
+                routing_msg = AIMessage(content=f"<name>{node_name}</name>", id=str(uuid4()))
+                for ev in output_to_responses_items_stream([routing_msg]):
+                    yield ev
+{% endif %}
+            for ev in output_to_responses_items_stream(new_msgs):
+                yield ev
+
+
+@invoke()
+async def predict(request: ResponsesAgentRequest) -> ResponsesAgentResponse:
+    outputs = []
+    async for event in predict_stream(request):
+        if event.type == "response.output_item.done":
+            outputs.append(event.item)
+    return ResponsesAgentResponse(output=outputs, custom_outputs=request.custom_inputs)
+{% endif %}
 
 #####################
 ## Registration
 #####################
 
 mlflow.langchain.autolog()
-{% if workflow_pattern == "supervisor_worker" %}
-agent = workflow.compile()  # workflow = create_supervisor(...) result
-{% elif workflow_pattern in ("sequential", "parallel") %}
-agent = workflow.compile()
+{% if has_lakebase %}
+mlflow.models.set_model(predict)
 {% else %}
-agent = create_tool_calling_agent(model, tools, system_prompt)
-{% endif %}
+agent = workflow.compile()
 AGENT = LangGraphResponsesAgent(agent)
 mlflow.models.set_model(AGENT)
+{% endif %}

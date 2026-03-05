@@ -100,6 +100,9 @@ with mlflow.start_run():
 {% if workflow_pattern == "supervisor_worker" %}
             f"langgraph-supervisor=={get_distribution('langgraph-supervisor').version}",
 {% endif %}
+{% if has_lakebase %}
+            "uuid-utils",
+{% endif %}
             f"mlflow=={get_distribution('mlflow').version}",
         ],
         model_config=config,

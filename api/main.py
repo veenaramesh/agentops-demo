@@ -94,6 +94,8 @@ class BundleConfig(BaseModel):
     worker_llms: list[WorkerLLMDef] = []
     pipeline_stages: list[PipelineLLMDef] = []
     parallel_branches: list[ParallelBranchDef] = []
+    has_lakebase: bool = False
+    lakebase_instance_name: str = ""
 
 
 @app.get("/models")
