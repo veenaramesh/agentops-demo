@@ -97,6 +97,9 @@ with mlflow.start_run():
             f"databricks-vectorsearch=={get_distribution('databricks-vectorsearch').version}",
             f"databricks-langchain=={get_distribution('databricks-langchain').version}",
             f"langgraph=={get_distribution('langgraph').version}",
+{% if workflow_pattern == "supervisor_worker" %}
+            f"langgraph-supervisor=={get_distribution('langgraph-supervisor').version}",
+{% endif %}
             f"mlflow=={get_distribution('mlflow').version}",
         ],
         model_config=config,

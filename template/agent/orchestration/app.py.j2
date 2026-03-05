@@ -14,7 +14,6 @@ from langchain_core.messages import (
     AIMessage,
     AIMessageChunk,
     BaseMessage,
-    convert_to_openai_messages,
 )
 from langchain_core.runnables import RunnableConfig, RunnableLambda
 from langchain_core.tools import BaseTool, tool
@@ -23,14 +22,19 @@ from langgraph.graph.message import add_messages
 from langgraph.prebuilt import create_react_agent
 from langgraph.types import Send
 from langgraph.prebuilt.tool_node import ToolNode
-from mlflow.entities import SpanType
 from mlflow.pyfunc import ResponsesAgent
 from mlflow.types.responses import (
     ResponsesAgentRequest,
     ResponsesAgentResponse,
     ResponsesAgentStreamEvent,
+    output_to_responses_items_stream,
+    to_chat_completions_input,
 )
 from pydantic import BaseModel as PydanticBaseModel
+{% if workflow_pattern == "supervisor_worker" %}
+from langchain.agents import create_agent
+from langgraph_supervisor import create_supervisor
+{% endif %}
 
 config_file = "ModelConfig.yml"
 model_config = mlflow.models.ModelConfig(development_config=config_file)
@@ -50,8 +54,9 @@ class AgentState(TypedDict):
 
 {% if workflow_pattern == "supervisor_worker" %}
 #####################
-## Supervisor / Worker
+## Supervisor / Worker  (langgraph-supervisor)
 #####################
+
 {% for worker in worker_llms %}
 # ── Worker: {{ worker.name }} ─────────────────────────────────────────────────
 {{ worker.name }}_model = ChatDatabricks(
@@ -88,7 +93,15 @@ def {{ worker.name }}_retrieve_{{ retriever.name }}(query: str) -> str:
     return f"{response[0].metadata.get('url', '')}  \n{response[0].page_content}"
 {% endfor %}
 {{ worker.name }}_tools = {{ worker.name }}_uc_tools + [{% for r in worker.retrievers %}{{ worker.name }}_retrieve_{{ r.name }}{% if not loop.last %}, {% endif %}{% endfor %}]
+
+# Worker agent — runs its own ReAct loop (max {{ worker.max_iterations }} tool-call rounds)
+{{ worker.name }}_agent = create_agent(
+    {{ worker.name }}_model,
+    tools={{ worker.name }}_tools,
+    name="{{ worker.name }}",
+)
 {% endfor %}
+
 # ── Supervisor LLM ────────────────────────────────────────────────────────────
 supervisor_model = ChatDatabricks(
     endpoint="{{ supervisor_llm.endpoint_name }}",
@@ -96,61 +109,34 @@ supervisor_model = ChatDatabricks(
     max_tokens=model_config.get("llm_config").get("max_tokens"),
 )
 
-# Routing schema — supervisor picks the next worker or signals FINISH
-class RouteDecision(PydanticBaseModel):
-    next: Literal[{% for w in worker_llms %}"{{ w.name }}", {% endfor %}"FINISH"]
+# TODO: Refine this prompt to improve routing quality.
+# Include as much detail as possible about each worker's capabilities.
+_supervisor_prompt = f"""
+You are a supervisor in a multi-agent system.
 
-# ── Worker sub-agents (each runs its own ReAct loop) ─────────────────────────
-{% for worker in worker_llms %}
-_{{ worker.name }}_agent = create_react_agent({{ worker.name }}_model, {{ worker.name }}_tools)
-_{{ worker.name }}_recursion_limit = {{ worker.max_iterations }} * 2 + 1
+1. Understand the user's last request.
+2. Read through the entire chat history.
+3. If the answer is already in the history, respond using that information.
+4. Otherwise, route to the most appropriate worker from the list below.
+5. Provide a clear, summarised response to the user.
 
-def {{ worker.name }}_node(state: AgentState, config: RunnableConfig):
-    result = _{{ worker.name }}_agent.invoke(
-        {"messages": state["messages"]},
-        config={"recursion_limit": _{{ worker.name }}_recursion_limit},
-    )
-    # Return only newly generated messages (create_react_agent includes the input)
-    return {"messages": result["messages"][len(state["messages"]):]}
-{% endfor %}
-# ── Supervisor node ───────────────────────────────────────────────────────────
-def supervisor_node(state: AgentState, config: RunnableConfig):
-    worker_info = "\n".join([
+Workers:
 {%- for w in worker_llms %}
-        "- {{ w.name }}: handles {{ w.tools | map(attribute='name') | join(', ') or 'general tasks' }}{% if w.retrievers %}, retrieves from {{ w.retrievers | map(attribute='name') | join(', ') }}{% endif %}",
+- {{ w.name }}: handles {{ w.tools | map(attribute='name') | join(', ') or 'general tasks' }}{% if w.retrievers %}, retrieves from {{ w.retrievers | map(attribute='name') | join(', ') }}{% endif %}
 {%- endfor %}
-    ])
-    base_system = (
-        "You are a supervisor managing these specialized workers:\n"
-        f"{worker_info}\n"
-        "Route the task to the right worker, or return FINISH when the task is complete."
-    )
-    sys_msg = (system_prompt + "\n\n" + base_system) if system_prompt else base_system
-    msgs = [{"role": "system", "content": sys_msg}] + list(state["messages"])
-    structured = supervisor_model.with_structured_output(RouteDecision)
-    decision = structured.invoke(msgs)
-    return {"next": decision.next}
+""".strip()
 
-# ── Graph ─────────────────────────────────────────────────────────────────────
-workflow = StateGraph(AgentState)
-workflow.add_node("supervisor", RunnableLambda(supervisor_node))
-{% for worker in worker_llms %}
-workflow.add_node("{{ worker.name }}", RunnableLambda({{ worker.name }}_node))
-{% endfor %}
-workflow.set_entry_point("supervisor")
-workflow.add_conditional_edges(
-    "supervisor",
-    lambda state: state["next"],
-    {
-{%- for worker in worker_llms %}
-        "{{ worker.name }}": "{{ worker.name }}",
-{%- endfor %}
-        "FINISH": END,
-    },
+if system_prompt:
+    _supervisor_prompt = system_prompt + "\n\n" + _supervisor_prompt
+
+# ── Build supervisor graph via langgraph-supervisor ───────────────────────────
+workflow = create_supervisor(
+    agents=[{% for w in worker_llms %}{{ w.name }}_agent{% if not loop.last %}, {% endif %}{% endfor %}],
+    model=supervisor_model,
+    prompt=_supervisor_prompt,
+    add_handoff_messages=False,
+    output_mode="full_history",
 )
-{% for worker in worker_llms %}
-workflow.add_edge("{{ worker.name }}", "supervisor")
-{% endfor %}
 
 {% elif workflow_pattern == "sequential" %}
 #####################
@@ -415,82 +401,6 @@ class LangGraphResponsesAgent(ResponsesAgent):
     def __init__(self, agent):
         self.agent = agent
 
-    def _responses_to_cc(self, message: dict[str, Any]) -> list[dict[str, Any]]:
-        """Convert from a Responses API output item to ChatCompletion messages."""
-        msg_type = message.get("type")
-        if msg_type == "function_call":
-            return [
-                {
-                    "role": "assistant",
-                    "content": "tool call",
-                    "tool_calls": [
-                        {
-                            "id": message["call_id"],
-                            "type": "function",
-                            "function": {
-                                "arguments": message["arguments"],
-                                "name": message["name"],
-                            },
-                        }
-                    ],
-                }
-            ]
-        elif msg_type == "message" and isinstance(message["content"], list):
-            return [
-                {"role": message["role"], "content": content["text"]}
-                for content in message["content"]
-            ]
-        elif msg_type == "reasoning":
-            return [{"role": "assistant", "content": json.dumps(message["summary"])}]
-        elif msg_type == "function_call_output":
-            return [
-                {
-                    "role": "tool",
-                    "content": message["output"],
-                    "tool_call_id": message["call_id"],
-                }
-            ]
-        compatible_keys = ["role", "content", "name", "tool_calls", "tool_call_id"]
-        filtered = {k: v for k, v in message.items() if k in compatible_keys}
-        return [filtered] if filtered else []
-
-    def _prep_msgs_for_cc_llm(self, responses_input) -> list[dict[str, Any]]:
-        cc_msgs = []
-        for msg in responses_input:
-            cc_msgs.extend(self._responses_to_cc(msg.model_dump()))
-
-    def _langchain_to_responses(self, messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
-        for message in messages:
-            message = message.model_dump()
-            role = message["type"]
-            if role == "ai":
-                if tool_calls := message.get("tool_calls"):
-                    return [
-                        self.create_function_call_item(
-                            id=message.get("id") or str(uuid4()),
-                            call_id=tool_call["id"],
-                            name=tool_call["name"],
-                            arguments=json.dumps(tool_call["args"]),
-                        )
-                        for tool_call in tool_calls
-                    ]
-                else:
-                    return [
-                        self.create_text_output_item(
-                            text=message["content"],
-                            id=message.get("id") or str(uuid4()),
-                        )
-                    ]
-            elif role == "tool":
-                return [
-                    self.create_function_call_output_item(
-                        call_id=message["tool_call_id"],
-                        output=message["content"],
-                    )
-                ]
-            elif role == "user":
-                return [message]
-
     def predict(self, request: ResponsesAgentRequest) -> ResponsesAgentResponse:
         outputs = [
             event.item
@@ -503,45 +413,57 @@ class LangGraphResponsesAgent(ResponsesAgent):
         self,
         request: ResponsesAgentRequest,
     ) -> Generator[ResponsesAgentStreamEvent, None, None]:
-        cc_msgs = []
-        for msg in request.input:
-            cc_msgs.extend(self._responses_to_cc(msg.model_dump()))
+        cc_msgs = to_chat_completions_input([i.model_dump() for i in request.input])
 
         max_iter = model_config.get("llm_max_iterations") or 10
-        # Outer recursion limit depends on the workflow pattern:
-        # - single: max_iter tool-call rounds → max_iter * 2 + 1 graph steps
-        # - supervisor_worker: supervisor routes across {{ worker_llms | length }} worker(s),
-        #   each worker handles its own inner limit; outer limit covers routing decisions
-        # - sequential / parallel: outer graph is linear (won't hit limit);
-        #   each inner agent has its own limit set at invocation time
+        # Outer recursion limit — sized per workflow pattern:
+        # - single:            max_iter tool-call rounds (max_iter * 2 + 1 graph steps)
+        # - supervisor_worker: budget covers routing across all {{ worker_llms | length }} worker(s);
+        #                      each worker runs its own inner ReAct loop independently
+        # - sequential/parallel: outer graph is linear (limit never hit);
+        #                        each inner agent was given its own limit at invocation time
 {% if workflow_pattern == "single" %}
         outer_recursion_limit = max_iter * 2 + 1
 {% elif workflow_pattern == "supervisor_worker" %}
         outer_recursion_limit = max_iter * {{ worker_llms | length }} * 2 + 1
 {% else %}
-        outer_recursion_limit = 50  # linear outer graph; inner agents have per-agent limits
+        outer_recursion_limit = 50
 {% endif %}
-        initial_state = {"messages": cc_msgs, "next": None, "branch_results": []}
-        for event in self.agent.stream(
-            initial_state,
-            stream_mode=["updates", "messages"],
+
+        first_message = True
+        seen_ids: set = set()
+
+        for _, events in self.agent.stream(
+            {"messages": cc_msgs},
+            stream_mode=["updates"],
             config={"recursion_limit": outer_recursion_limit},
         ):
-            if event[0] == "updates":
-                for node_data in event[1].values():
-                    if "messages" not in node_data:
-                        continue
-                    for item in self._langchain_to_responses(node_data["messages"]):
-                        yield ResponsesAgentStreamEvent(type="response.output_item.done", item=item)
-            elif event[0] == "messages":
-                try:
-                    chunk = event[1][0]
-                    if isinstance(chunk, AIMessageChunk) and (content := chunk.content):
-                        yield ResponsesAgentStreamEvent(
-                            **self.create_text_delta(delta=content, item_id=chunk.id),
-                        )
-                except Exception as e:
-                    print(e)
+            new_msgs = [
+                msg
+                for v in events.values()
+                for msg in v.get("messages", [])
+                if msg.id not in seen_ids
+            ]
+            if first_message:
+                # Skip the echoed input messages on the first node update
+                seen_ids.update(msg.id for msg in new_msgs[: len(cc_msgs)])
+                new_msgs = new_msgs[len(cc_msgs):]
+                first_message = False
+            else:
+                seen_ids.update(msg.id for msg in new_msgs)
+{% if workflow_pattern == "supervisor_worker" %}
+                # Emit the active worker name so callers can show routing steps
+                node_name = next(iter(events.keys()), None)
+                if node_name:
+                    yield ResponsesAgentStreamEvent(
+                        type="response.output_item.done",
+                        item=self.create_text_output_item(
+                            text=f"<name>{node_name}</name>", id=str(uuid4())
+                        ),
+                    )
+{% endif %}
+            if new_msgs:
+                yield from output_to_responses_items_stream(new_msgs)
 
 
 #####################
@@ -549,7 +471,9 @@ class LangGraphResponsesAgent(ResponsesAgent):
 #####################
 
 mlflow.langchain.autolog()
-{% if workflow_pattern in ("supervisor_worker", "sequential", "parallel") %}
+{% if workflow_pattern == "supervisor_worker" %}
+agent = workflow.compile()  # workflow = create_supervisor(...) result
+{% elif workflow_pattern in ("sequential", "parallel") %}
 agent = workflow.compile()
 {% else %}
 agent = create_tool_calling_agent(model, tools, system_prompt)
