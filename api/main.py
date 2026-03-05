@@ -3,16 +3,20 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
 
-from fastapi import FastAPI
+import httpx
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field
 from generator import generate_project_zip
 
 app = FastAPI()
+
+import os
+_origins = [o.strip() for o in os.getenv("ALLOWED_ORIGINS", "*").split(",") if o.strip()]
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=_origins,
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -85,6 +89,31 @@ class BundleConfig(BaseModel):
     worker_llms: list[WorkerLLMDef] = []
     pipeline_stages: list[PipelineLLMDef] = []
     parallel_branches: list[ParallelBranchDef] = []
+
+
+@app.get("/models")
+async def list_models(request: Request):
+    auth = request.headers.get("Authorization", "")
+    host = request.headers.get("X-Databricks-Host", "").rstrip("/")
+    if not auth or not host:
+        raise HTTPException(status_code=400, detail="Missing Authorization or X-Databricks-Host header")
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            resp = await client.get(
+                f"{host}/api/2.0/serving-endpoints",
+                headers={"Authorization": auth},
+            )
+        resp.raise_for_status()
+        endpoints = resp.json().get("endpoints", [])
+        models = sorted(
+            e["name"] for e in endpoints
+            if e.get("name", "").startswith("databricks-")
+        )
+        return {"models": models}
+    except httpx.HTTPStatusError as e:
+        raise HTTPException(status_code=e.response.status_code, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=str(e))
 
 
 @app.post("/generate")
