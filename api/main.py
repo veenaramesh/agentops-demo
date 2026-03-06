@@ -101,6 +101,7 @@ class BundleConfig(BaseModel):
     agent_lakebase_tools: list[LakebaseDef] = []
     workflow_pattern: str = "single"   # "single" | "supervisor_worker" | "sequential" | "routed"
     supervisor_max_iterations: int = 10
+    supervisor_description: str = ""
     router_description: str = ""
     supervisor_llm: SupervisorLLMDef | None = None
     worker_llms: list[WorkerLLMDef] = []

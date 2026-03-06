@@ -1,6 +1,4 @@
-import json
-import operator
-from typing import Annotated, Any, Generator, Literal, Optional, Sequence, TypedDict, Union
+from typing import Annotated, Any, Generator, Optional, Sequence, TypedDict
 from uuid import uuid4
 
 import mlflow
@@ -9,19 +7,12 @@ from databricks_langchain import (
     UCFunctionToolkit,
     VectorSearchRetrieverTool,
 )
-from langchain_core.language_models import LanguageModelLike
-from langchain_core.messages import (
-    AIMessage,
-    AIMessageChunk,
-    BaseMessage,
-)
+from langchain_core.messages import AIMessage, BaseMessage
 from langchain_core.runnables import RunnableConfig, RunnableLambda
-from langchain_core.tools import BaseTool, tool
+from langchain_core.tools import tool
 from langgraph.graph import END, START, StateGraph
 from langgraph.graph.message import add_messages
 from langgraph.prebuilt import create_react_agent
-from langgraph.types import Send
-from langgraph.prebuilt.tool_node import ToolNode
 from mlflow.pyfunc import ResponsesAgent
 from mlflow.types.responses import (
     ResponsesAgentRequest,
@@ -30,9 +21,7 @@ from mlflow.types.responses import (
     output_to_responses_items_stream,
     to_chat_completions_input,
 )
-from pydantic import BaseModel as PydanticBaseModel
 {% if workflow_pattern == "supervisor_worker" %}
-from langchain.agents import create_agent
 from langgraph_supervisor import create_supervisor
 {% endif %}
 {% if has_lakebase %}
@@ -53,8 +42,6 @@ system_prompt = model_config.get("system_prompt")
 
 class AgentState(TypedDict):
     messages: Annotated[Sequence[BaseMessage], add_messages]
-    branch_results: Annotated[list[str], operator.add]  # parallel fan-out accumulator
-    next: Optional[str]                                  # supervisor routing
     custom_inputs: Optional[dict[str, Any]]
     custom_outputs: Optional[dict[str, Any]]
 
@@ -85,18 +72,13 @@ class AgentState(TypedDict):
 {{ worker.name }}_uc_tools = []
 {%- endif %}
 {% for retriever in worker.retrievers %}
-@tool
-def {{ worker.name }}_retrieve_{{ retriever.name }}(query: str) -> str:
-    """Retrieve from {{ retriever.name }} for {{ worker.name }}."""
-    vs_tool = VectorSearchRetrieverTool(
-        index_name="{{ retriever.index_name }}",
-        tool_name="{{ worker.name }}_{{ retriever.name }}_retriever",
-        tool_description="Retrieves information from {{ retriever.name }}.",
-        num_results={{ retriever.num_results }},
-        columns={{ retriever.columns.split(",") | list | tojson }},
-    )
-    response = vs_tool.invoke(query)
-    return f"{response[0].metadata.get('url', '')}  \n{response[0].page_content}"
+{{ worker.name }}_{{ retriever.name }}_retriever = VectorSearchRetrieverTool(
+    index_name="{{ retriever.index_name }}",
+    tool_name="{{ worker.name }}_{{ retriever.name }}_retriever",
+    tool_description="Retrieves information from {{ retriever.name }}.",
+    num_results={{ retriever.num_results }},
+    columns=[{% for col in retriever.columns.split(",") %}"{{ col | trim }}"{% if not loop.last %}, {% endif %}{% endfor %}],
+)
 {% endfor %}
 {%- for lt in worker.lakebase_tools %}
 @tool
@@ -106,10 +88,10 @@ def {{ worker.name }}_{{ lt.name }}(query: str) -> str:
     raise NotImplementedError("{{ lt.name }} is not yet implemented.")
 {% endfor %}
 _{{ worker.name }}_lakebase_fns = [{% for lt in worker.lakebase_tools %}{{ worker.name }}_{{ lt.name }}{% if not loop.last %}, {% endif %}{% endfor %}]
-{{ worker.name }}_tools = {{ worker.name }}_uc_tools + [{% for r in worker.retrievers %}{{ worker.name }}_retrieve_{{ r.name }}{% if not loop.last %}, {% endif %}{% endfor %}] + _{{ worker.name }}_lakebase_fns
+{{ worker.name }}_tools = {{ worker.name }}_uc_tools + [{% for r in worker.retrievers %}{{ worker.name }}_{{ r.name }}_retriever{% if not loop.last %}, {% endif %}{% endfor %}] + _{{ worker.name }}_lakebase_fns
 
 # Worker agent — runs its own ReAct loop (max {{ worker.max_iterations }} tool-call rounds)
-{{ worker.name }}_agent = create_agent(
+{{ worker.name }}_agent = create_react_agent(
     {{ worker.name }}_model,
     tools={{ worker.name }}_tools,
     name="{{ worker.name }}",
@@ -123,21 +105,20 @@ supervisor_model = ChatDatabricks(
     max_tokens=model_config.get("llm_config").get("max_tokens"),
 )
 
-# TODO: Refine this prompt to improve routing quality.
-# Include as much detail as possible about each worker's capabilities.
-_supervisor_prompt = f"""
-You are a supervisor in a multi-agent system.
-
-1. Understand the user's last request.
-2. Read through the entire chat history.
-3. If the answer is already in the history, respond using that information.
-4. Otherwise, route to the most appropriate worker from the list below.
-5. Provide a clear, summarised response to the user.
-
-Workers:
+_supervisor_prompt = """You are a supervisor orchestrating a team of specialized agents.
+{% if supervisor_description %}
+{{ supervisor_description }}
+{% endif %}
+Workers available:
 {%- for w in worker_llms %}
 - {{ w.name }}: handles {{ w.tools | map(attribute='name') | join(', ') or 'general tasks' }}{% if w.retrievers %}, retrieves from {{ w.retrievers | map(attribute='name') | join(', ') }}{% endif %}
 {%- endfor %}
+
+Instructions:
+1. Read the full conversation history before deciding.
+2. If the answer is already present, synthesize and respond directly.
+3. Otherwise delegate to the most appropriate worker.
+4. After receiving a worker response, decide if the task is complete or another worker is needed.
 """.strip()
 
 if system_prompt:
@@ -178,18 +159,13 @@ workflow = create_supervisor(
 {{ stage.name }}_uc_tools = []
 {%- endif %}
 {% for retriever in stage.retrievers %}
-@tool
-def {{ stage.name }}_retrieve_{{ retriever.name }}(query: str) -> str:
-    """Retrieve from {{ retriever.name }} for {{ stage.name }}."""
-    vs_tool = VectorSearchRetrieverTool(
-        index_name="{{ retriever.index_name }}",
-        tool_name="{{ stage.name }}_{{ retriever.name }}_retriever",
-        tool_description="Retrieves information from {{ retriever.name }}.",
-        num_results={{ retriever.num_results }},
-        columns={{ retriever.columns.split(",") | list | tojson }},
-    )
-    response = vs_tool.invoke(query)
-    return f"{response[0].metadata.get('url', '')}  \n{response[0].page_content}"
+{{ stage.name }}_{{ retriever.name }}_retriever = VectorSearchRetrieverTool(
+    index_name="{{ retriever.index_name }}",
+    tool_name="{{ stage.name }}_{{ retriever.name }}_retriever",
+    tool_description="Retrieves information from {{ retriever.name }}.",
+    num_results={{ retriever.num_results }},
+    columns=[{% for col in retriever.columns.split(",") %}"{{ col | trim }}"{% if not loop.last %}, {% endif %}{% endfor %}],
+)
 {% endfor %}
 {%- for lt in stage.lakebase_tools %}
 @tool
@@ -199,7 +175,7 @@ def {{ stage.name }}_{{ lt.name }}(query: str) -> str:
     raise NotImplementedError("{{ lt.name }} is not yet implemented.")
 {% endfor %}
 _{{ stage.name }}_lakebase_fns = [{% for lt in stage.lakebase_tools %}{{ stage.name }}_{{ lt.name }}{% if not loop.last %}, {% endif %}{% endfor %}]
-{{ stage.name }}_tools = {{ stage.name }}_uc_tools + [{% for r in stage.retrievers %}{{ stage.name }}_retrieve_{{ r.name }}{% if not loop.last %}, {% endif %}{% endfor %}] + _{{ stage.name }}_lakebase_fns
+{{ stage.name }}_tools = {{ stage.name }}_uc_tools + [{% for r in stage.retrievers %}{{ stage.name }}_{{ r.name }}_retriever{% if not loop.last %}, {% endif %}{% endfor %}] + _{{ stage.name }}_lakebase_fns
 {% endfor %}
 
 # ── Stage nodes ───────────────────────────────────────────────────────────────
@@ -212,7 +188,7 @@ def {{ stage.name }}_node(state: AgentState, config: RunnableConfig):
     Receives all prior messages; returns only newly generated messages."""
     result = _{{ stage.name }}_agent.invoke(
         {"messages": state["messages"]},
-        config={"recursion_limit": _{{ stage.name }}_recursion_limit},
+        config={**config, "recursion_limit": _{{ stage.name }}_recursion_limit},
     )
     return {"messages": result["messages"][len(state["messages"]):]}
 {% endfor %}
@@ -259,18 +235,13 @@ workflow.add_edge("{{ stage.name }}", END)
 {{ branch.name }}_uc_tools = []
 {%- endif %}
 {% for retriever in branch.retrievers %}
-@tool
-def {{ branch.name }}_retrieve_{{ retriever.name }}(query: str) -> str:
-    """Retrieve from {{ retriever.name }} for {{ branch.name }}."""
-    vs_tool = VectorSearchRetrieverTool(
-        index_name="{{ retriever.index_name }}",
-        tool_name="{{ branch.name }}_{{ retriever.name }}_retriever",
-        tool_description="Retrieves information from {{ retriever.name }}.",
-        num_results={{ retriever.num_results }},
-        columns={{ retriever.columns.split(",") | list | tojson }},
-    )
-    response = vs_tool.invoke(query)
-    return f"{response[0].metadata.get('url', '')}  \n{response[0].page_content}"
+{{ branch.name }}_{{ retriever.name }}_retriever = VectorSearchRetrieverTool(
+    index_name="{{ retriever.index_name }}",
+    tool_name="{{ branch.name }}_{{ retriever.name }}_retriever",
+    tool_description="Retrieves information from {{ retriever.name }}.",
+    num_results={{ retriever.num_results }},
+    columns=[{% for col in retriever.columns.split(",") %}"{{ col | trim }}"{% if not loop.last %}, {% endif %}{% endfor %}],
+)
 {% endfor %}
 {%- for lt in branch.lakebase_tools %}
 @tool
@@ -280,7 +251,7 @@ def {{ branch.name }}_{{ lt.name }}(query: str) -> str:
     raise NotImplementedError("{{ lt.name }} is not yet implemented.")
 {% endfor %}
 _{{ branch.name }}_lakebase_fns = [{% for lt in branch.lakebase_tools %}{{ branch.name }}_{{ lt.name }}{% if not loop.last %}, {% endif %}{% endfor %}]
-{{ branch.name }}_tools = {{ branch.name }}_uc_tools + [{% for r in branch.retrievers %}{{ branch.name }}_retrieve_{{ r.name }}{% if not loop.last %}, {% endif %}{% endfor %}] + _{{ branch.name }}_lakebase_fns
+{{ branch.name }}_tools = {{ branch.name }}_uc_tools + [{% for r in branch.retrievers %}{{ branch.name }}_{{ r.name }}_retriever{% if not loop.last %}, {% endif %}{% endfor %}] + _{{ branch.name }}_lakebase_fns
 {% endfor %}
 
 # ── Branch nodes (each runs its own ReAct loop) ───────────────────────────────
@@ -292,7 +263,7 @@ def {{ branch.name }}_node(state: AgentState, config: RunnableConfig):
     """Routed branch {{ loop.index }}/{{ parallel_branches | length }}: {{ branch.name }}."""
     result = _{{ branch.name }}_agent.invoke(
         {"messages": state["messages"]},
-        config={"recursion_limit": _{{ branch.name }}_recursion_limit},
+        config={**config, "recursion_limit": _{{ branch.name }}_recursion_limit},
     )
     return {"messages": result["messages"][len(state["messages"]):]}
 {% endfor %}
@@ -352,18 +323,13 @@ uc_tools = toolkit.tools
 uc_tools = []
 {%- endif %}
 {% for retriever in agent_retrievers %}
-@tool
-def retrieve_{{ retriever.name }}(query: str) -> str:
-    """Retrieve from {{ retriever.name }} using the query."""
-    vs_tool = VectorSearchRetrieverTool(
-        index_name="{{ retriever.index_name }}",
-        tool_name="{{ retriever.name }}_retriever",
-        tool_description="Retrieves information from {{ retriever.name }}.",
-        num_results={{ retriever.num_results }},
-        columns={{ retriever.columns.split(",") | list | tojson }},
-    )
-    response = vs_tool.invoke(query)
-    return f"{response[0].metadata.get('url', '')}  \n{response[0].page_content}"
+{{ retriever.name }}_retriever = VectorSearchRetrieverTool(
+    index_name="{{ retriever.index_name }}",
+    tool_name="{{ retriever.name }}_retriever",
+    tool_description="Retrieves information from {{ retriever.name }}.",
+    num_results={{ retriever.num_results }},
+    columns=[{% for col in retriever.columns.split(",") %}"{{ col | trim }}"{% if not loop.last %}, {% endif %}{% endfor %}],
+)
 {% endfor %}
 {%- for lt in agent_lakebase_tools %}
 @tool
@@ -373,7 +339,7 @@ def {{ lt.name }}(query: str) -> str:
     raise NotImplementedError("{{ lt.name }} is not yet implemented.")
 {% endfor %}
 _agent_lakebase_fns = [{% for lt in agent_lakebase_tools %}{{ lt.name }}{% if not loop.last %}, {% endif %}{% endfor %}]
-tools = uc_tools + [{% for retriever in agent_retrievers %}retrieve_{{ retriever.name }}{% if not loop.last %}, {% endif %}{% endfor %}] + _agent_lakebase_fns
+tools = uc_tools + [{% for retriever in agent_retrievers %}{{ retriever.name }}_retriever{% if not loop.last %}, {% endif %}{% endfor %}] + _agent_lakebase_fns
 
 model = ChatDatabricks(
     endpoint=model_config.get("llm_config").get("endpoint"),
@@ -382,40 +348,11 @@ model = ChatDatabricks(
 )
 
 
-def _build_agent_workflow(
-    model: LanguageModelLike,
-    tools: Union[ToolNode, Sequence[BaseTool]],
-    system_prompt: Optional[str] = None,
-) -> StateGraph:
-    model = model.bind_tools(tools)
-
-    def should_continue(state: AgentState):
-        last_message = state["messages"][-1]
-        if isinstance(last_message, AIMessage) and last_message.tool_calls:
-            return "continue"
-        return "end"
-
-    preprocessor = (
-        RunnableLambda(lambda state: [{"role": "system", "content": system_prompt}] + state["messages"])
-        if system_prompt
-        else RunnableLambda(lambda state: state["messages"])
-    )
-    model_runnable = preprocessor | model
-
-    def call_model(state: AgentState, config: RunnableConfig):
-        return {"messages": [model_runnable.invoke(state, config)]}
-
-    wf = StateGraph(AgentState)
-    wf.add_node("agent", RunnableLambda(call_model))
-    wf.add_node("tools", ToolNode(tools))
-    wf.set_entry_point("agent")
-    wf.add_conditional_edges(
-        "agent", should_continue, {"continue": "tools", "end": END}
-    )
-    wf.add_edge("tools", "agent")
-    return wf
-
-workflow = _build_agent_workflow(model, tools, system_prompt)
+workflow = create_react_agent(
+    model,
+    tools=tools,
+    prompt=system_prompt,
+)
 
 {% endif %}
 
