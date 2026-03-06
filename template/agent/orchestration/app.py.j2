@@ -232,9 +232,9 @@ workflow.add_edge("{{ stage.name }}", END)
 {%- endif %}
 {% endfor %}
 
-{% elif workflow_pattern == "parallel" %}
+{% elif workflow_pattern == "routed" %}
 #####################
-## Parallel fan-out
+## Router (conditional dispatch — picks one subagent per request)
 #####################
 
 {% for branch in parallel_branches %}
@@ -283,70 +283,56 @@ _{{ branch.name }}_lakebase_fns = [{% for lt in branch.lakebase_tools %}{{ branc
 {{ branch.name }}_tools = {{ branch.name }}_uc_tools + [{% for r in branch.retrievers %}{{ branch.name }}_retrieve_{{ r.name }}{% if not loop.last %}, {% endif %}{% endfor %}] + _{{ branch.name }}_lakebase_fns
 {% endfor %}
 
-# Aggregator: synthesizes results from all branches into one final answer
-aggregator_model = ChatDatabricks(
-    endpoint=model_config.get("llm_config").get("endpoint"),
-    temperature=model_config.get("llm_config").get("temperature"),
-    max_tokens=model_config.get("llm_config").get("max_tokens"),
-)
-
-# BranchState: passed to each branch via Send (subset of AgentState)
-class BranchState(TypedDict):
-    messages: Sequence[BaseMessage]
-
-# ── Branch nodes (run in parallel) ───────────────────────────────────────────
+# ── Branch nodes (each runs its own ReAct loop) ───────────────────────────────
 {% for branch in parallel_branches %}
 _{{ branch.name }}_agent = create_react_agent({{ branch.name }}_model, {{ branch.name }}_tools)
 _{{ branch.name }}_recursion_limit = {{ branch.max_iterations }} * 2 + 1
 
-def {{ branch.name }}_node(state: BranchState) -> dict:
-    """Parallel branch {{ loop.index }}/{{ parallel_branches | length }}: {{ branch.name }}."""
+def {{ branch.name }}_node(state: AgentState, config: RunnableConfig):
+    """Routed branch {{ loop.index }}/{{ parallel_branches | length }}: {{ branch.name }}."""
     result = _{{ branch.name }}_agent.invoke(
-        dict(state),
+        {"messages": state["messages"]},
         config={"recursion_limit": _{{ branch.name }}_recursion_limit},
     )
-    last = result["messages"][-1]
-    content = last.content if hasattr(last, "content") else str(last)
-    return {"branch_results": [f"[{{ branch.name }}] {content}"]}
+    return {"messages": result["messages"][len(state["messages"]):]}
 {% endfor %}
 
-def fan_out(state: AgentState) -> list[Send]:
-    """Dispatch to all branches in parallel."""
-    return [
-{%- for branch in parallel_branches %}
-        Send("{{ branch.name }}", {"messages": state["messages"]}),
-{%- endfor %}
-    ]
+# ── Router: picks exactly one branch based on the incoming query ──────────────
+_ROUTE_OPTIONS = [{% for branch in parallel_branches %}"{{ branch.name }}"{% if not loop.last %}, {% endif %}{% endfor %}]
 
-def aggregator_node(state: AgentState, config: RunnableConfig):
-    """Synthesize parallel branch results into a single final answer."""
-    combined = "\n\n".join(state["branch_results"])
-    msgs = list(state["messages"]) + [
-        {
-            "role": "user",
-            "content": (
-                "Multiple specialized agents have provided these results in parallel:\n\n"
-                f"{combined}\n\n"
-                "Synthesize them into a single, coherent final answer."
-            ),
-        }
-    ]
-    response = aggregator_model.invoke(msgs)
-    return {"messages": [response]}
+def _route(state: AgentState) -> str:
+    """{{ router_description if router_description else "Route to the appropriate subagent." }}
 
-# ── Graph (fan-out → parallel branches → aggregator) ─────────────────────────
+    Options: {{ parallel_branches | map(attribute='name') | join(', ') }}
+
+    TODO: replace this keyword stub with real routing logic (e.g. an LLM call,
+    embedding similarity, or explicit rules).
+    """
+    msg = state["messages"][-1].content.lower() if state["messages"] else ""
+{% for branch in parallel_branches %}
+    if "{{ branch.name }}" in msg:  # TODO: replace with real condition
+        return "{{ branch.name }}"
+{% endfor %}
+    return _ROUTE_OPTIONS[0]  # default
+
+# ── Graph (router → one branch → END) ────────────────────────────────────────
 workflow = StateGraph(AgentState)
 {% for branch in parallel_branches %}
-workflow.add_node("{{ branch.name }}", {{ branch.name }}_node)
+workflow.add_node("{{ branch.name }}", RunnableLambda({{ branch.name }}_node))
 {%- endfor %}
-workflow.add_node("aggregator", RunnableLambda(aggregator_node))
 
-# START dispatches to all branches simultaneously via Send
-workflow.add_conditional_edges(START, fan_out, [{% for branch in parallel_branches %}"{{ branch.name }}"{% if not loop.last %}, {% endif %}{% endfor %}])
-{% for branch in parallel_branches %}
-workflow.add_edge("{{ branch.name }}", "aggregator")
+workflow.add_conditional_edges(
+    START,
+    _route,
+    {
+{%- for branch in parallel_branches %}
+        "{{ branch.name }}": "{{ branch.name }}",
 {%- endfor %}
-workflow.add_edge("aggregator", END)
+    },
+)
+{% for branch in parallel_branches %}
+workflow.add_edge("{{ branch.name }}", END)
+{%- endfor %}
 
 {% else %}
 #####################
@@ -459,16 +445,17 @@ class LangGraphResponsesAgent(ResponsesAgent):
         max_iter = model_config.get("llm_max_iterations") or 10
         # Outer recursion limit — sized per workflow pattern:
         # - single:            max_iter tool-call rounds (max_iter * 2 + 1 graph steps)
-        # - supervisor_worker: budget covers routing across all {{ worker_llms | length }} worker(s);
+        # - supervisor_worker: supervisor_max_iterations routing rounds across {{ worker_llms | length }} worker(s);
         #                      each worker runs its own inner ReAct loop independently
-        # - sequential/parallel: outer graph is linear (limit never hit);
-        #                        each inner agent was given its own limit at invocation time
+        # - sequential/routed: outer graph is linear (limit never hit);
+        #                      each inner agent was given its own limit at invocation time
 {% if workflow_pattern == "single" %}
         outer_recursion_limit = max_iter * 2 + 1
 {% elif workflow_pattern == "supervisor_worker" %}
-        outer_recursion_limit = max_iter * {{ worker_llms | length }} * 2 + 1
+        # supervisor_max_iterations controls how many times the supervisor can route between workers
+        outer_recursion_limit = {{ supervisor_max_iterations }} * {{ worker_llms | length }} * 2 + 1
 {% else %}
-        outer_recursion_limit = 50
+        outer_recursion_limit = 50  # linear: each branch runs its own inner limit
 {% endif %}
 
         first_message = True
@@ -515,9 +502,9 @@ _max_iter = model_config.get("llm_max_iterations") or 10
 {% if workflow_pattern == "single" %}
 _outer_recursion_limit = _max_iter * 2 + 1
 {% elif workflow_pattern == "supervisor_worker" %}
-_outer_recursion_limit = _max_iter * {{ worker_llms | length }} * 2 + 1
+_outer_recursion_limit = {{ supervisor_max_iterations }} * {{ worker_llms | length }} * 2 + 1
 {% else %}
-_outer_recursion_limit = 50
+_outer_recursion_limit = 50  # linear: each branch runs its own inner limit
 {% endif %}
 
 def _get_thread_id(request: ResponsesAgentRequest) -> str:

@@ -54,7 +54,7 @@ config = {
         "max_tokens":  512,
         "temperature": 0.01,
     },
-    "llm_max_iterations": {{ llm_max_iterations }},
+    "llm_max_iterations": {% if workflow_pattern == "supervisor_worker" %}{{ supervisor_max_iterations }}{% else %}{{ llm_max_iterations }}{% endif %},
     "system_prompt": "You are a helpful assistant.",  # TODO: customize
 }
 
