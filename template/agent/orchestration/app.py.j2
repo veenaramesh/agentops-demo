@@ -98,7 +98,15 @@ def {{ worker.name }}_retrieve_{{ retriever.name }}(query: str) -> str:
     response = vs_tool.invoke(query)
     return f"{response[0].metadata.get('url', '')}  \n{response[0].page_content}"
 {% endfor %}
-{{ worker.name }}_tools = {{ worker.name }}_uc_tools + [{% for r in worker.retrievers %}{{ worker.name }}_retrieve_{{ r.name }}{% if not loop.last %}, {% endif %}{% endfor %}]
+{%- for lt in worker.lakebase_tools %}
+@tool
+def {{ worker.name }}_{{ lt.name }}(query: str) -> str:
+    """{{ lt.description if lt.description else "Query the " + lt.instance_name + " Lakebase Postgres database." }}"""
+    # TODO: implement — instance: {{ lt.instance_name }}
+    raise NotImplementedError("{{ lt.name }} is not yet implemented.")
+{% endfor %}
+_{{ worker.name }}_lakebase_fns = [{% for lt in worker.lakebase_tools %}{{ worker.name }}_{{ lt.name }}{% if not loop.last %}, {% endif %}{% endfor %}]
+{{ worker.name }}_tools = {{ worker.name }}_uc_tools + [{% for r in worker.retrievers %}{{ worker.name }}_retrieve_{{ r.name }}{% if not loop.last %}, {% endif %}{% endfor %}] + _{{ worker.name }}_lakebase_fns
 
 # Worker agent — runs its own ReAct loop (max {{ worker.max_iterations }} tool-call rounds)
 {{ worker.name }}_agent = create_agent(
@@ -183,7 +191,15 @@ def {{ stage.name }}_retrieve_{{ retriever.name }}(query: str) -> str:
     response = vs_tool.invoke(query)
     return f"{response[0].metadata.get('url', '')}  \n{response[0].page_content}"
 {% endfor %}
-{{ stage.name }}_tools = {{ stage.name }}_uc_tools + [{% for r in stage.retrievers %}{{ stage.name }}_retrieve_{{ r.name }}{% if not loop.last %}, {% endif %}{% endfor %}]
+{%- for lt in stage.lakebase_tools %}
+@tool
+def {{ stage.name }}_{{ lt.name }}(query: str) -> str:
+    """{{ lt.description if lt.description else "Query the " + lt.instance_name + " Lakebase Postgres database." }}"""
+    # TODO: implement — instance: {{ lt.instance_name }}
+    raise NotImplementedError("{{ lt.name }} is not yet implemented.")
+{% endfor %}
+_{{ stage.name }}_lakebase_fns = [{% for lt in stage.lakebase_tools %}{{ stage.name }}_{{ lt.name }}{% if not loop.last %}, {% endif %}{% endfor %}]
+{{ stage.name }}_tools = {{ stage.name }}_uc_tools + [{% for r in stage.retrievers %}{{ stage.name }}_retrieve_{{ r.name }}{% if not loop.last %}, {% endif %}{% endfor %}] + _{{ stage.name }}_lakebase_fns
 {% endfor %}
 
 # ── Stage nodes ───────────────────────────────────────────────────────────────
@@ -256,7 +272,15 @@ def {{ branch.name }}_retrieve_{{ retriever.name }}(query: str) -> str:
     response = vs_tool.invoke(query)
     return f"{response[0].metadata.get('url', '')}  \n{response[0].page_content}"
 {% endfor %}
-{{ branch.name }}_tools = {{ branch.name }}_uc_tools + [{% for r in branch.retrievers %}{{ branch.name }}_retrieve_{{ r.name }}{% if not loop.last %}, {% endif %}{% endfor %}]
+{%- for lt in branch.lakebase_tools %}
+@tool
+def {{ branch.name }}_{{ lt.name }}(query: str) -> str:
+    """{{ lt.description if lt.description else "Query the " + lt.instance_name + " Lakebase Postgres database." }}"""
+    # TODO: implement — instance: {{ lt.instance_name }}
+    raise NotImplementedError("{{ lt.name }} is not yet implemented.")
+{% endfor %}
+_{{ branch.name }}_lakebase_fns = [{% for lt in branch.lakebase_tools %}{{ branch.name }}_{{ lt.name }}{% if not loop.last %}, {% endif %}{% endfor %}]
+{{ branch.name }}_tools = {{ branch.name }}_uc_tools + [{% for r in branch.retrievers %}{{ branch.name }}_retrieve_{{ r.name }}{% if not loop.last %}, {% endif %}{% endfor %}] + _{{ branch.name }}_lakebase_fns
 {% endfor %}
 
 # Aggregator: synthesizes results from all branches into one final answer
@@ -355,7 +379,15 @@ def retrieve_{{ retriever.name }}(query: str) -> str:
     response = vs_tool.invoke(query)
     return f"{response[0].metadata.get('url', '')}  \n{response[0].page_content}"
 {% endfor %}
-tools = uc_tools + [{% for retriever in agent_retrievers %}retrieve_{{ retriever.name }}{% if not loop.last %}, {% endif %}{% endfor %}]
+{%- for lt in agent_lakebase_tools %}
+@tool
+def {{ lt.name }}(query: str) -> str:
+    """{{ lt.description if lt.description else "Query the " + lt.instance_name + " Lakebase Postgres database." }}"""
+    # TODO: implement — instance: {{ lt.instance_name }}
+    raise NotImplementedError("{{ lt.name }} is not yet implemented.")
+{% endfor %}
+_agent_lakebase_fns = [{% for lt in agent_lakebase_tools %}{{ lt.name }}{% if not loop.last %}, {% endif %}{% endfor %}]
+tools = uc_tools + [{% for retriever in agent_retrievers %}retrieve_{{ retriever.name }}{% if not loop.last %}, {% endif %}{% endfor %}] + _agent_lakebase_fns
 
 model = ChatDatabricks(
     endpoint=model_config.get("llm_config").get("endpoint"),

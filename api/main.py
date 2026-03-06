@@ -22,6 +22,12 @@ app.add_middleware(
 )
 
 
+class LakebaseDef(BaseModel):
+    name: str
+    instance_name: str
+    description: str = ""
+
+
 class ToolDef(BaseModel):
     name: str
     catalog: str = "main"
@@ -47,6 +53,7 @@ class WorkerLLMDef(BaseModel):
     max_iterations: int = 10
     tools: list[ToolDef] = []
     retrievers: list[RetrieverDef] = []
+    lakebase_tools: list[LakebaseDef] = []
 
 
 class SupervisorLLMDef(BaseModel):
@@ -62,6 +69,7 @@ class PipelineLLMDef(BaseModel):
     max_iterations: int = 10
     tools: list[ToolDef] = []
     retrievers: list[RetrieverDef] = []
+    lakebase_tools: list[LakebaseDef] = []
 
 
 class ParallelBranchDef(BaseModel):
@@ -71,6 +79,7 @@ class ParallelBranchDef(BaseModel):
     max_iterations: int = 10
     tools: list[ToolDef] = []
     retrievers: list[RetrieverDef] = []
+    lakebase_tools: list[LakebaseDef] = []
 
 
 class BundleConfig(BaseModel):
@@ -89,6 +98,7 @@ class BundleConfig(BaseModel):
     retrievers: list[RetrieverDef] = []
     agent_tools: list[ToolDef] = []
     agent_retrievers: list[RetrieverDef] = []
+    agent_lakebase_tools: list[LakebaseDef] = []
     workflow_pattern: str = "single"   # "single" | "supervisor_worker" | "sequential" | "parallel"
     supervisor_llm: SupervisorLLMDef | None = None
     worker_llms: list[WorkerLLMDef] = []
